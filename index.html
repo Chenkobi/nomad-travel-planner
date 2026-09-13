@@ -4,10 +4,10 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#f6f7f9" />
-<link rel="manifest" href="manifest.webmanifest?v=2" />
-<link rel="apple-touch-icon" sizes="180x180" href="globe-icon-v2.png" />
-<link rel="icon" type="image/png" href="globe-icon-v2.png" />
-<title>Nomad — מתכננים את הדרך</title>
+<link rel="manifest" href="manifest.webmanifest?v=3" />
+<link rel="apple-touch-icon" sizes="180x180" href="globe-icon-v3.png" />
+<link rel="icon" type="image/png" href="globe-icon-v3.png" />
+<title>TRIPY — מתכננים את הדרך</title>
 <style>
 :root{--bg:#f6f7f9;--card:#fff;--ink:#17212b;--muted:#75808b;--line:#e7eaee;--blue:#3478f6;--blue2:#eaf1ff;--mint:#dff8ed;--mint-ink:#16825c;--orange:#fff0d8;--orange-ink:#a35a00;--purple:#efe7ff;--purple-ink:#7046bd;--shadow:0 12px 34px rgba(22,34,48,.07);--r:22px}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html{-webkit-text-size-adjust:100%;touch-action:manipulation}body{touch-action:manipulation}button,.money-row,.event-card,.detail-card{touch-action:manipulation}.trip-home{display:grid;gap:13px}.trip-home-head{display:flex;justify-content:space-between;align-items:end;margin:10px 2px 3px}.trip-home-head h1{font-size:30px;letter-spacing:-1px;margin:0}.trip-home-head p{color:var(--muted);font-size:13px;margin:5px 0 0}.trip-list{display:grid;gap:13px}.trip-card{min-height:176px;border-radius:24px;background-size:cover;background-position:center;position:relative;overflow:hidden;color:#fff;padding:20px;display:flex;flex-direction:column;justify-content:flex-end;text-align:right;cursor:pointer;box-shadow:var(--shadow);transition:transform .2s}.trip-card:before{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,20,35,.05),rgba(10,20,35,.82))}.trip-card>*{position:relative;z-index:1}.trip-card h2{margin:0 0 4px;font-size:24px}.trip-card p{margin:0;color:#d9e0e7;font-size:13px}.trip-card .trip-badge{align-self:flex-start;background:rgba(255,255,255,.16);padding:7px 10px;border-radius:99px;font-size:12px;margin-bottom:auto}.trip-card:hover{transform:translateY(-2px)}.trip-card.new-trip{background:#18232d;align-items:center;justify-content:center;border:1px dashed #536171;color:#fff}.trip-card.new-trip:before{display:none}.trip-card.new-trip .plus{font-size:34px}.trip-card.new-trip h2{font-size:17px;margin:6px 0 0}.trip-back{background:transparent;color:var(--muted);font-size:12px;font-weight:700}.trip-back:hover{color:var(--blue)}
@@ -18,7 +18,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,Bl
 </head>
 <body>
 <div class="app">
-  <header class="top"><div class="brand"><span class="globe-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.8 9h16.4M3.8 15h16.4M12 3.5c2.1 2.3 3.2 5.1 3.2 8.5s-1.1 6.2-3.2 8.5c-2.1-2.3-3.2-5.1-3.2-8.5S9.9 5.8 12 3.5Z"/></svg></span>nomad<span>.</span></div><button class="trip-menu" id="tripMenu">הטיולים שלי</button><div class="avatar">KC</div></header>
+  <header class="top"><div class="brand"><span class="globe-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.8 9h16.4M3.8 15h16.4M12 3.5c2.1 2.3 3.2 5.1 3.2 8.5s-1.1 6.2-3.2 8.5c-2.1-2.3-3.2-5.1-3.2-8.5S9.9 5.8 12 3.5Z"/></svg></span>TRIPY</div><button class="trip-menu" id="tripMenu">הטיולים שלי</button><div class="avatar">KC</div></header>
   <main id="tripHome" class="trip-home"><div class="trip-home-head"><div><h1>הטיולים שלי</h1><p>כל המסלולים והזיכרונות שלך במקום אחד</p></div><button class="primary" id="newTripHome">＋ טיול חדש</button></div><div class="trip-list"><article class="trip-card" id="openTrip" style="background-image:url('https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80')"><span class="trip-badge">הטיול הבא · 10 ימים</span><h2>שוויץ · איטליה · צרפת</h2><p>12–21 ביוני 2026 · 3 מדינות</p></article><article class="trip-card" style="background-image:url('https://images.unsplash.com/photo-1502602898657-3e91760cbb34?auto=format&fit=crop&w=1200&q=80')"><span class="trip-badge">טיול קודם</span><h2>פריז · ספטמבר 2025</h2><p>4–8 בספטמבר 2025 · 5 ימים</p></article><article class="trip-card new-trip" id="newTripCard"><span class="plus">＋</span><h2>יצירת טיול חדש</h2></article></div></main><div id="tripShell" class="hidden"><section class="hero">
     <div class="eyebrow">הטיול הבא שלך</div><h1 id="tripTitle">שוויץ · איטליה · צרפת</h1><p id="tripDates">12–21 ביוני 2026  ·  10 ימים</p>
     <div class="hero-meta"><span class="pill">✈️ 3 טיסות</span><span class="pill">🚆 2 רכבות</span><span class="pill">🏨 3 מלונות</span></div>
