@@ -25,7 +25,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,Bl
   </section>
   <nav class="tabs" aria-label="ניווט"><button class="tab active" data-tab="schedule">לו״ז יומי</button><button class="tab" data-tab="docs">מסמכים</button><button class="tab" data-tab="currency">מטבע</button><button class="tab" data-tab="share">שיתוף</button></nav>
   <main id="schedule" class="panel">
-    <div class="section-head"><h2>היום, יום חמישי</h2><button class="add-item" id="addItem" aria-label="הוספת פריט חדש">＋</button></div>
+    <div class="section-head"><h2 id="dayHeading">היום, יום חמישי</h2><button class="add-item" id="addItem" aria-label="הוספת פריט חדש">＋</button></div>
     <div class="day-strip" id="days"></div>
     <div class="section-head"><h2>ציר הזמן</h2><span class="small">עודכן לפני 8 דקות</span></div>
     <div class="timeline" id="timeline"></div>
@@ -41,9 +41,9 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,Bl
 const seedEvents=[['09:20','✈️','טיסה LX 162','תל אביב → ציריך · נחיתה 12:55','טיסה'],['14:10','🚆','רכבת לציריך מרכז','רציף 4 · נסיעה של 12 דקות','תחבורה'],['15:00','🏨','צ׳ק-אין ב-Ruby Mimi','Niederdorfstrasse 13 · ציריך','מלון'],['19:30','🍽️','ארוחת ערב · Kronenhalle','הזמנה ל-4 אנשים · נשמר במפות','הזמנה']];
 const savedEvents=JSON.parse(localStorage.getItem('nomad-events')||'null');
 const events=savedEvents||seedEvents;
-const days=['12','13','14','15','16','17','18','19','20','21'];
+const days=['12','13','14','15','16','17','18','19','20','21'];let selectedDay=0;const dayNames=['חמישי','שישי','שבת','ראשון','שני','שלישי','רביעי','חמישי','שישי','שבת'];
 const timeline=document.querySelector('#timeline'); const daysEl=document.querySelector('#days');
-function render(){daysEl.innerHTML=days.map((d,i)=>`<button class="day ${i===0?'active':''}"><span>יונ׳</span><strong>${d}</strong></button>`).join('');timeline.innerHTML=events.map(e=>`<div class="event"><div class="time">${e[0]}</div><div class="event-card"><div class="event-icon">${e[1]}</div><div><h3>${e[2]}</h3><p>${e[3]}</p><span class="tag">${e[4]}</span></div></div></div>`).join('')}
+function render(){daysEl.innerHTML=days.map((d,i)=>`<button class="day ${i===selectedDay?'active':''}" data-day="${i}"><span>יונ׳</span><strong>${d}</strong></button>`).join('');timeline.innerHTML=events.map(e=>`<div class="event"><div class="time">${e[0]}</div><div class="event-card"><div class="event-icon">${e[1]}</div><div><h3>${e[2]}</h3><p>${e[3]}</p><span class="tag">${e[4]}</span></div></div></div>`).join('');daysEl.querySelectorAll('.day').forEach(day=>day.onclick=()=>{selectedDay=Number(day.dataset.day);document.querySelector('#dayHeading').textContent=`יום ${dayNames[selectedDay]}`;render()})}
 render();
 document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click',()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));btn.classList.add('active');document.querySelectorAll('.panel').forEach(x=>x.classList.add('hidden'));document.getElementById(btn.dataset.tab).classList.remove('hidden')}));
 const modal=document.querySelector('#modal');document.querySelector('#closeModal').onclick=()=>modal.classList.remove('show');function showTrip(){document.querySelector('#tripHome').classList.add('hidden');document.querySelector('#tripShell').classList.remove('hidden')}function showHome(){document.querySelector('#tripShell').classList.add('hidden');document.querySelector('#tripHome').classList.remove('hidden')}document.querySelector('#openTrip').onclick=showTrip;document.querySelector('#tripMenu').onclick=showHome;document.querySelector('#newTripHome').onclick=()=>toast('נפתח אשף יצירת טיול חדש');document.querySelector('#newTripCard').onclick=()=>toast('נפתח אשף יצירת טיול חדש');
