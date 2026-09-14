@@ -320,6 +320,16 @@ def ensure_hotel_events():
         if trip.get("hotels"):
             for booking in trip["hotels"]:
                 if booking.get("country") in country_map: booking["country"] = country_map[booking["country"]]; trips_changed = True
+            coalesced = []
+            for booking in sorted(trip["hotels"], key=lambda h: (str(h.get("start") or "9999-99-99"), str(h.get("end") or "9999-99-99"))):
+                same = next((existing for existing in coalesced if str(existing.get("name") or "").strip().casefold() == str(booking.get("name") or "").strip().casefold() and str(existing.get("document") or "") == str(booking.get("document") or "") and str(existing.get("start") or "") <= str(booking.get("end") or "") and str(booking.get("start") or "") <= str(existing.get("end") or "")), None)
+                if same:
+                    same["start"] = min(str(same.get("start") or booking.get("start") or ""), str(booking.get("start") or same.get("start") or ""))
+                    same["end"] = max(str(same.get("end") or booking.get("end") or ""), str(booking.get("end") or same.get("end") or ""))
+                    if not same.get("city") and booking.get("city"): same["city"] = booking["city"]
+                    trips_changed = True
+                else: coalesced.append(booking)
+            if len(coalesced) != len(trip["hotels"]): trip["hotels"] = coalesced; trips_changed = True
         ordered_hotels = sorted(trip.get("hotels", []), key=lambda h: str(h.get("start") or "9999-99-99"))
         countries = list(dict.fromkeys((h.get("country") or "") for h in ordered_hotels if h.get("country")))
         if not countries:
