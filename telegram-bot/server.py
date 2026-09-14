@@ -64,7 +64,7 @@ def extract_pdf_text(path):
 def gemini_extract(path):
     if not GEMINI_API_KEY: return None
     schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"}},"required":["type"]}
-    prompt = "Classify this travel PDF and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, insurance, or other. Insurance must be document-only: do not invent itinerary facts. For flights extract airline, flight_number, departure/arrival ISO dates and 24-hour times, origin and destination airports or cities. For hotels extract exact property name, stay city/country, check-in/out ISO dates and times. For trains extract train_number, origin, destination, departure_date and departure_time. For attractions extract attraction, date, time and location. For car rentals extract pickup_date, pickup_time, pickup_location, vehicle_type, and when clearly present dropoff_date, dropoff_time and dropoff_location. Use empty strings for fields not clearly present; never guess."
+    prompt = "Classify this travel PDF and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, insurance, or other. Insurance must be document-only: do not invent itinerary facts. For flights extract airline, flight_number, departure/arrival ISO dates and 24-hour times, origin and destination airports or cities. For hotels extract exact property name, stay city/country, check-in/out ISO dates and times. For trains extract train_number, origin, destination, departure_date and departure_time. For attractions, including screenshots of museum, tour, factory, venue, or admission tickets, classify as attraction and extract attraction, date, time and location. For car rentals extract pickup_date, pickup_time, pickup_location, vehicle_type, and when clearly present dropoff_date, dropoff_time and dropoff_location. Use empty strings for fields not clearly present; never guess."
     mime_type = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain"}.get(path.suffix.lower(), "application/pdf")
     payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":mime_type,"data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
     for attempt in range(3):
@@ -107,10 +107,17 @@ def validate_booking_trip(trip):
     return bool(hotel and has_destination and trip.get("start") and trip.get("end"))
 
 
+def infer_document_type(ai):
+    doc_type = str(ai.get("type") or "").strip().lower()
+    attraction_fields = (str(ai.get("attraction") or "").strip(), str(ai.get("date") or "").strip(), str(ai.get("time") or "").strip(), str(ai.get("location") or "").strip())
+    if doc_type in ("", "other") and all(attraction_fields): return "attraction"
+    return doc_type or "hotel"
+
+
 def create_trip_from_document(filename, path, source="Telegram"):
     text = extract_pdf_text(path)
     ai = gemini_extract(path) or {}
-    doc_type = str(ai.get("type") or "hotel").strip().lower()
+    doc_type = infer_document_type(ai)
     if doc_type == "flight":
         departure = str(ai.get("departure_date") or "").strip()
         arrival = str(ai.get("arrival_date") or departure).strip()
@@ -147,8 +154,11 @@ def create_trip_from_document(filename, path, source="Telegram"):
         if not target: raise ValueError("car rental has no existing dated trip to attach to")
         record = {"pickup_date":pickup_date,"pickup_time":pickup_time,"pickup_location":pickup_location,"vehicle_type":vehicle_type,"dropoff_date":str(ai.get("dropoff_date") or "").strip(),"dropoff_time":str(ai.get("dropoff_time") or "").strip(),"dropoff_location":str(ai.get("dropoff_location") or "").strip(),"document":filename}
         target.setdefault("rentals", []).append(record); target["rentals"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["rentals"]}.values()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"השכרת רכב · {vehicle_type}"; save_trips(trips)
-        events = load_events(); title = f"איסוף רכב · {vehicle_type}"; details = f"{pickup_location} · שעה {pickup_time}"; event = [pickup_time, "🚗", title, details, "רכב", source, pickup_date]
+        events = load_events(); title = f"איסוף רכב · {vehicle_type}"; details = f"{pickup_location} · שעה {pickup_time}"; event = [pickup_time, "🚗", title, details, "רכב", source, pickup_date, pickup_location]
         if not any(len(e) > 6 and e[2] == title and e[6] == pickup_date for e in events): events.insert(0, event); save_events(events)
+        if record["dropoff_date"] and record["dropoff_time"] and record["dropoff_location"]:
+            return_title = f"החזרת רכב · {vehicle_type}"; return_event = [record["dropoff_time"], "🚗", return_title, f"{record['dropoff_location']} · שעה {record['dropoff_time']}", "רכב", source, record["dropoff_date"], record["dropoff_location"]]
+            if not any(len(e) > 6 and e[2] == return_title and e[6] == record["dropoff_date"] for e in events): events.insert(0, return_event); save_events(events)
         return {**target, "_ingested_type": "car_rental"}
     if doc_type in ("train", "attraction"):
         if doc_type == "train":
