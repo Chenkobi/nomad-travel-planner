@@ -59,8 +59,8 @@ def extract_pdf_text(path):
 
 def gemini_extract(path):
     if not GEMINI_API_KEY: return None
-    schema = {"type":"object","properties":{"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"}},"required":["hotel","city","country","check_in","check_out","check_in_time","check_out_time"]}
-    prompt = "Extract the booking facts from this PDF. Return only JSON matching the schema. Use ISO dates YYYY-MM-DD and 24-hour times HH:MM. Do not guess: use an empty string for any field that is not clearly present. hotel must be the exact property name; city and country must be the actual stay location."
+    schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"}},"required":["type","hotel","city","country","check_in","check_out","check_in_time","check_out_time","airline","flight_number","departure_date","departure_time","arrival_date","arrival_time","origin","destination"]}
+    prompt = "Classify this travel PDF and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, or other. For flights extract airline, flight_number, departure/arrival ISO dates and 24-hour times, origin and destination airports or cities. For hotels extract exact property name, stay city/country, check-in/out ISO dates and times. Use empty strings for fields not clearly present; never infer or copy hotel fields into a flight."
     payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":"application/pdf","data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
     for attempt in range(3):
         try:
@@ -105,6 +105,28 @@ def validate_booking_trip(trip):
 def create_trip_from_document(filename, path, source="Telegram"):
     text = extract_pdf_text(path)
     ai = gemini_extract(path) or {}
+    doc_type = str(ai.get("type") or "hotel").strip().lower()
+    if doc_type == "flight":
+        departure = str(ai.get("departure_date") or "").strip()
+        arrival = str(ai.get("arrival_date") or departure).strip()
+        required = [str(ai.get(k) or "").strip() for k in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_date", "arrival_time")]
+        if not departure or not arrival or not all(required):
+            raise ValueError("flight document missing unambiguous flight facts")
+        trips = load_trips()
+        target = next((t for t in trips if t.get("start") <= departure <= t.get("end")), None)
+        event = [str(ai.get("departure_time")), "✈️", f"טיסה {ai.get('airline')} {ai.get('flight_number')}", f"{ai.get('origin')} → {ai.get('destination')} · הגעה {ai.get('arrival_time')}", "טיסה", source, departure]
+        if target:
+            target.setdefault("flights", []).append({"airline":ai.get("airline"),"number":ai.get("flight_number"),"origin":ai.get("origin"),"destination":ai.get("destination"),"departure_date":departure,"departure_time":ai.get("departure_time"),"arrival_date":arrival,"arrival_time":ai.get("arrival_time"),"document":filename})
+            target["flights"] = list({json.dumps(f, sort_keys=True, ensure_ascii=False): f for f in target["flights"]}.values())
+            target.setdefault("documents", []).append(filename)
+            target["documents"] = list(dict.fromkeys(target["documents"]))
+            target.setdefault("document_titles", {})[filename] = f"כרטיס טיסה · {ai.get('airline')} {ai.get('flight_number')}"
+            save_trips(trips)
+            events = load_events()
+            if not any(len(e) > 6 and e[2] == event[2] and e[6] == departure for e in events):
+                events.insert(0, event); save_events(events)
+            return target
+        raise ValueError("flight has no existing dated trip to attach to")
     known = [("Budapest", "הונגריה"), ("בודפשט", "הונגריה"), ("מינכן", "גרמניה"), ("München", "גרמניה"), ("Munich", "גרמניה"), ("פרנקפורט", "גרמניה"), ("Frankfurt", "גרמניה"), ("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
     city_labels = {"Budapest":"בודפשט", "בודפשט":"בודפשט", "Munich":"מינכן", "München":"מינכן", "מינכן":"מינכן", "Frankfurt":"פרנקפורט", "פרנקפורט":"פרנקפורט"}
     ai_city, ai_country = str(ai.get("city") or "").strip(), str(ai.get("country") or "").strip()
@@ -146,7 +168,7 @@ def create_trip_from_document(filename, path, source="Telegram"):
     checkin_time = str(ai.get("check_in_time") or "14:00").strip()
     checkout_time = str(ai.get("check_out_time") or "11:00").strip()
     document_title = (f"אישור מלון · {hotel}" if hotel else "אישור הזמנה")
-    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": images, "destinations": destinations, "hotel": hotel, "checkin_time": checkin_time, "checkout_time": checkout_time, "document_titles": {filename: document_title}}
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": images, "destinations": destinations, "hotel": hotel, "hotels": [{"name": hotel, "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "document": filename}], "checkin_time": checkin_time, "checkout_time": checkout_time, "document_titles": {filename: document_title}}
     if start and end:
         trip["days"] = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
     if not validate_booking_trip(trip):
@@ -177,18 +199,33 @@ def create_trip_from_document(filename, path, source="Telegram"):
         match["days"] = (merged_end - merged_start).days + 1
         match["images"] = list(dict.fromkeys(match.get("images", [match.get("image")] if match.get("image") else []) + [image]))
         match["image"] = match["images"][0]
-        same_booking = old_start == new_start and old_end == new_end
+        same_booking = old_start == new_start and old_end == new_end or any(h.get("start") == start and h.get("end") == end for h in (match.get("hotels") or []))
         if same_booking:
-            old_docs = set(match.get("documents", []))
-            match["documents"] = [filename]
-            match["document_titles"] = trip["document_titles"]
+            old_docs = list(match.get("documents", []))
+            old_titles = match.get("document_titles", {})
+            replaced_docs = []
+            for doc in old_docs:
+                title = str(old_titles.get(doc, ""))
+                if title.startswith("אישור מלון") and any(h.get("document") == doc and h.get("start") == start and h.get("end") == end for h in (match.get("hotels") or [])):
+                    continue
+                replaced_docs.append(doc)
+            match["documents"] = list(dict.fromkeys(replaced_docs + [filename]))
+            match["document_titles"] = {**old_titles, **trip["document_titles"]}
             current_events = load_events()
             current_events = [e for e in current_events if not (len(e) > 6 and e[4] == "מלון" and e[6] in (start, end))]
             save_events(current_events)
         else:
             match["documents"] = list(dict.fromkeys(match.get("documents", [match.get("document")] if match.get("document") else []) + [filename]))
             match["document_titles"] = {**match.get("document_titles", {}), **trip["document_titles"]}
-        if hotel: match["hotel"] = hotel
+        booking = {"name": hotel, "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "document": filename}
+        existing_hotels = match.get("hotels") or ([{"name": match.get("hotel"), "start": match.get("start"), "end": match.get("end"), "checkin_time": match.get("checkin_time", "14:00"), "checkout_time": match.get("checkout_time", "11:00")} ] if match.get("hotel") else [])
+        if same_booking:
+            existing_hotels = [h for h in existing_hotels if not (h.get("start") == start and h.get("end") == end)] + [booking]
+        elif hotel:
+            existing_hotels = [h for h in existing_hotels if not (h.get("start") == start and h.get("end") == end)] + [booking]
+        match["hotels"] = existing_hotels
+        if hotel and same_booking: match["hotel"] = hotel; match["checkin_time"] = checkin_time; match["checkout_time"] = checkout_time
+        elif not match.get("hotel") and hotel: match["hotel"] = hotel
         save_trips(trips)
         return match
     trips.insert(0, trip); save_trips(trips)
