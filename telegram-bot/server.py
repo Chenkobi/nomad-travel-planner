@@ -327,6 +327,13 @@ def ensure_hotel_events():
                 if hotel:
                     trip["hotel"] = hotel; trips_changed = True; break
         hotel = hotel or "המלון"
+        if not trip.get("hotels") and hotel != "המלון" and trip.get("start") and trip.get("end"):
+            city = (trip.get("destinations") or [{}])[0].get("city", "")
+            country = (trip.get("destinations") or [{}])[0].get("country", "")
+            trip["hotels"] = [{"name": hotel, "city": city, "country": country, "start": trip["start"], "end": trip["end"], "checkin_time": trip.get("checkin_time", "14:00"), "checkout_time": trip.get("checkout_time", "11:00"), "document": trip.get("document")}]
+            trips_changed = True
+        for collection in ("flights", "trains", "attractions", "rentals"):
+            if collection not in trip: trip[collection] = []; trips_changed = True
         docs = list(dict.fromkeys(trip.get("documents") or ([trip.get("document")] if trip.get("document") else [])))
         titles = trip.get("document_titles", {})
         unique_docs = []
