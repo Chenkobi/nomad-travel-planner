@@ -152,16 +152,27 @@ def add_event(title, details, kind, source="Telegram", event_time=None):
 
 def ensure_hotel_events():
     events = load_events()
+    trips = load_trips()
     existing = {str(e[2]) for e in events if len(e) > 2}
     changed = False
-    for trip in load_trips():
-        hotel = trip.get("hotel") or "המלון"
+    trips_changed = False
+    for trip in trips:
+        hotel = trip.get("hotel") or ""
+        if not hotel and trip.get("document"):
+            candidates = list(UPLOADS.glob("*" + Path(trip["document"]).name)) + list(UPLOADS.glob("*" + Path(trip["document"]).stem + "*"))
+            for candidate in candidates:
+                text = extract_pdf_text(candidate)
+                match = re.search(r"(?:Adina Apartment Hotel[^\n]+|[A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+){0,5} Hotel[^\n]*)", text)
+                if match:
+                    hotel = match.group(0).strip(); trip["hotel"] = hotel; trips_changed = True; break
+        hotel = hotel or "המלון"
         if trip.get("start") and not any(x.startswith("צ׳ק-אין ·") for x in existing):
             events.insert(0, ["14:00", ICONS["מלון"], "צ׳ק-אין · " + hotel, f"{trip['start']} · ברירת מחדל למלון: 14:00", "מלון", "PDF"])
             changed = True
         if trip.get("end") and trip.get("end") != trip.get("start") and not any(x.startswith("צ׳ק-אאוט ·") for x in existing):
             events.insert(0, ["11:00", ICONS["מלון"], "צ׳ק-אאוט · " + hotel, f"{trip['end']} · ברירת מחדל למלון: 11:00", "מלון", "PDF"])
             changed = True
+    if trips_changed: save_trips(trips)
     if changed: save_events(events)
     return events
 
