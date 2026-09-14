@@ -259,12 +259,14 @@ def ensure_hotel_events():
         hotel = hotel or "המלון"
         docs = list(dict.fromkeys(trip.get("documents") or ([trip.get("document")] if trip.get("document") else [])))
         titles = trip.get("document_titles", {})
-        for doc in docs:
-            if doc:
-                desired_title = f"אישור מלון · {hotel}" if hotel != "המלון" else "אישור מלון"
-                if titles.get(doc) != desired_title:
-                    titles[doc] = desired_title
-                    trips_changed = True
+        unique_docs = []
+        seen_titles = set()
+        for doc in reversed(docs):
+            if not doc: continue
+            desired_title = f"אישור מלון · {hotel}" if hotel != "המלון" else "אישור מלון"
+            if desired_title in seen_titles: continue
+            seen_titles.add(desired_title); unique_docs.append(doc); titles[doc] = desired_title
+        docs = list(reversed(unique_docs))
         if trip.get("documents") != docs: trip["documents"] = docs; trips_changed = True
         if trip.get("document_titles") != titles: trip["document_titles"] = titles; trips_changed = True
         for event in events:
