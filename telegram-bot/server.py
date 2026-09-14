@@ -69,11 +69,12 @@ def create_trip_from_document(filename, path, source="Telegram"):
         dates = re.findall(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})\b", text)
         dates = [("20" + y, m, d.zfill(2)) for d, m, y in dates]
     months = {"JAN":"01","FEB":"02","MAR":"03","APR":"04","MAY":"05","JUN":"06","JUL":"07","AUG":"08","SEP":"09","OCT":"10","NOV":"11","DEC":"12"}
-    text_dates = re.findall(r"\b(\d{1,2})\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(20\d{2})\b", text, re.I)
-    if text_dates: dates += [(y, months[m.upper()], d.zfill(2)) for d, m, y in text_dates]
+    text_dates = re.findall(r"\b(MON|TUE|WED|THU|FRI|SAT|SUN|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{1,2}),?\s+(20\d{2})\b", text, re.I)
+    if text_dates: dates += [(y, months[m[:3].upper()], d.zfill(2)) for m, d, y in text_dates]
     start = "-".join(dates[0]) if dates else ""
     end = "-".join(dates[-1]) if len(dates) > 1 else start
     title = (" · ".join(dict.fromkeys(x[1] for x in cities)) + (" · " + " · ".join(dict.fromkeys(x[0] for x in cities)) if cities else "")) or Path(filename).stem or "טיול חדש"
+    title = title.replace("Munich", "מינכן").replace("München", "מינכן")
     image = "https://images.unsplash.com/photo-1595867818082-083862f3d630?auto=format&fit=crop&w=1200&q=80" if any(x[1] == "גרמניה" for x in cities) else "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"
     trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": len(dates) if dates else 0, "source": source, "document": filename, "image": image}
     trips = load_trips(); trips.insert(0, trip); save_trips(trips)
