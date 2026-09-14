@@ -114,7 +114,7 @@ def create_trip_from_document(filename, path, source="Telegram"):
             raise ValueError("flight document missing unambiguous flight facts")
         trips = load_trips()
         target = next((t for t in trips if t.get("start") <= departure <= t.get("end")), None)
-        event = [str(ai.get("departure_time")), "✈️", f"טיסה {ai.get('airline')} {ai.get('flight_number')}", f"{ai.get('origin')} → {ai.get('destination')} · הגעה {ai.get('arrival_time')}", "טיסה", source, departure]
+        event = [str(ai.get("departure_time")), "✈️", f"טיסה {ai.get('airline')} {ai.get('flight_number')}", f"{ai.get('origin')} → {ai.get('destination')} · יציאה {ai.get('departure_time')} · הגעה {ai.get('arrival_time')}", "טיסה", source, departure]
         if target:
             target.setdefault("flights", []).append({"airline":ai.get("airline"),"number":ai.get("flight_number"),"origin":ai.get("origin"),"destination":ai.get("destination"),"departure_date":departure,"departure_time":ai.get("departure_time"),"arrival_date":arrival,"arrival_time":ai.get("arrival_time"),"document":filename})
             target["flights"] = list({json.dumps(f, sort_keys=True, ensure_ascii=False): f for f in target["flights"]}.values())
@@ -125,7 +125,7 @@ def create_trip_from_document(filename, path, source="Telegram"):
             events = load_events()
             if not any(len(e) > 6 and e[2] == event[2] and e[6] == departure for e in events):
                 events.insert(0, event); save_events(events)
-            return target
+            return {**target, "_ingested_type": "flight"}
         raise ValueError("flight has no existing dated trip to attach to")
     if doc_type in ("train", "attraction"):
         if doc_type == "train":
@@ -141,7 +141,7 @@ def create_trip_from_document(filename, path, source="Telegram"):
         key = "trains" if doc_type == "train" else "attractions"; target.setdefault(key, []).append(record); target[key] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target[key]}.values()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = ((f"כרטיס רכבת · {name}") if doc_type == "train" else f"אטרקציה · {name}"); save_trips(trips)
         events = load_events(); event = [time_value, icon, title, details, kind, source, date]
         if not any(len(e) > 6 and e[2] == title and e[6] == date for e in events): events.insert(0, event); save_events(events)
-        return target
+        return {**target, "_ingested_type": doc_type}
     known = [("Budapest", "הונגריה"), ("בודפשט", "הונגריה"), ("מינכן", "גרמניה"), ("München", "גרמניה"), ("Munich", "גרמניה"), ("פרנקפורט", "גרמניה"), ("Frankfurt", "גרמניה"), ("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
     city_labels = {"Budapest":"בודפשט", "בודפשט":"בודפשט", "Munich":"מינכן", "München":"מינכן", "מינכן":"מינכן", "Frankfurt":"פרנקפורט", "פרנקפורט":"פרנקפורט"}
     ai_city, ai_country = str(ai.get("city") or "").strip(), str(ai.get("country") or "").strip()
@@ -361,9 +361,9 @@ def handle_message(message):
             with urllib.request.urlopen(download_url, timeout=60) as response: local.write_bytes(response.read())
             trip = create_trip_from_document(name, local)
             title = trip["title"]
-            if trip.get("start"):
+            if trip.get("_ingested_type", "hotel") == "hotel" and trip.get("start"):
                 add_event("צ׳ק-אין · " + (trip.get("hotel") or title), f"{trip['start']} · שעה: {trip.get('checkin_time', '14:00')}", "מלון", event_time=trip.get("checkin_time", "14:00"))
-            if trip.get("end") and trip.get("end") != trip.get("start"):
+            if trip.get("_ingested_type", "hotel") == "hotel" and trip.get("end") and trip.get("end") != trip.get("start"):
                 add_event("צ׳ק-אאוט · " + (trip.get("hotel") or title), f"{trip['end']} · שעה: {trip.get('checkout_time', '11:00')}", "מלון", event_time=trip.get("checkout_time", "11:00"))
             send(chat, f"קיבלתי את {name} ✅\\nעודכן הטיול: {title}")
         except Exception as exc:
