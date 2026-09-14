@@ -94,7 +94,7 @@ def create_trip_from_document(filename, path, source="Telegram"):
     destinations = [{"city": city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), "country": country, "image": image_by_city.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), image)} for city, country in cities]
     hotel_match = re.search(r"(?:Adina Apartment Hotel[^\n]+|[A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+){0,5} Hotel[^\n]*)", text)
     hotel = hotel_match.group(0).strip() if hotel_match else ""
-    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": images, "destinations": destinations, "hotel": hotel, "document_titles": {filename: ("אישור מלון · " + hotel if hotel else "אישור הזמנה") + (f" · {start}–{end}" if start and end else "")}}
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": images, "destinations": destinations, "hotel": hotel, "document_titles": {filename: ("Adina hotel voucher" if "Adina Apartment Hotel" in hotel else ("אישור מלון" if hotel else "אישור הזמנה")) + (f" · {start}–{end}" if start and end else "")}}
     if start and end:
         trip["days"] = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
     if not validate_booking_trip(trip):
@@ -175,6 +175,17 @@ def ensure_hotel_events():
                 if match:
                     hotel = match.group(0).strip(); trip["hotel"] = hotel; trips_changed = True; break
         hotel = hotel or "המלון"
+        docs = trip.get("documents") or ([trip.get("document")] if trip.get("document") else [])
+        titles = trip.get("document_titles", {})
+        for doc in docs:
+            if doc and doc not in titles:
+                titles[doc] = "Adina hotel voucher" if "Adina" in hotel else "אישור מלון"
+                trips_changed = True
+        if docs and trip.get("documents") != docs: trip["documents"] = docs; trips_changed = True
+        if trip.get("document_titles") != titles: trip["document_titles"] = titles; trips_changed = True
+        for event in events:
+            if len(event) >= 3 and event[2].startswith("צ׳ק-") and "המלון" in event[2]:
+                event[2] = event[2].replace("המלון", hotel); changed = True
         if trip.get("start") and not any(x.startswith("צ׳ק-אין ·") for x in existing):
             events.insert(0, ["14:00", ICONS["מלון"], "צ׳ק-אין · " + hotel, f"{trip['start']} · ברירת מחדל למלון: 14:00", "מלון", "PDF"])
             changed = True
