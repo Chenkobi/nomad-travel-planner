@@ -150,6 +150,22 @@ def add_event(title, details, kind, source="Telegram", event_time=None):
     save_events(events)
     return event
 
+def ensure_hotel_events():
+    events = load_events()
+    existing = {str(e[2]) for e in events if len(e) > 2}
+    changed = False
+    for trip in load_trips():
+        hotel = trip.get("hotel") or "המלון"
+        if trip.get("start") and not any(x.startswith("צ׳ק-אין ·") for x in existing):
+            events.insert(0, ["14:00", ICONS["מלון"], "צ׳ק-אין · " + hotel, f"{trip['start']} · ברירת מחדל למלון: 14:00", "מלון", "PDF"])
+            changed = True
+        if trip.get("end") and trip.get("end") != trip.get("start") and not any(x.startswith("צ׳ק-אאוט ·") for x in existing):
+            events.insert(0, ["11:00", ICONS["מלון"], "צ׳ק-אאוט · " + hotel, f"{trip['end']} · ברירת מחדל למלון: 11:00", "מלון", "PDF"])
+            changed = True
+    if changed: save_events(events)
+    return events
+
+
 def handle_message(message):
     chat = str(message.get("chat", {}).get("id", ""))
     if ALLOWED_CHAT and chat != ALLOWED_CHAT:
@@ -215,7 +231,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self): self.send_response(204); self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"); self.send_header("Access-Control-Allow-Headers", "Content-Type"); self.end_headers()
     def do_GET(self):
         path = self.path.split("?", 1)[0]
-        if path == "/api/events": self._json(200, {"events": load_events()}); return
+        if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
         if path == "/api/trips": self._json(200, {"trips": load_trips()}); return
         if path.startswith("/api/documents/"):
             filename = Path(urllib.parse.unquote(path[len("/api/documents/"):])).name
