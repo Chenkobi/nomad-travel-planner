@@ -346,7 +346,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
-        if path == "/api/trips": self._json(200, {"trips": load_trips()}); return
+        if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": load_trips()}); return
         if path.startswith("/api/documents/"):
             filename = Path(urllib.parse.unquote(path[len("/api/documents/"):])).name
             file_path = UPLOADS / filename
