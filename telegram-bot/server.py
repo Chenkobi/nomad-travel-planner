@@ -211,36 +211,46 @@ def add_event(title, details, kind, source="Telegram", event_time=None):
 def ensure_hotel_events():
     events = load_events()
     trips = load_trips()
-    existing = {str(e[2]) for e in events if len(e) > 2}
-    changed = False
+    before = len(events)
+    demo_markers = ("LX 162", "Ruby Mimi", "רכבת לציריך", "אישור חדש")
+    events = [e for e in events if len(e) < 5 or (e[2] not in demo_markers and e[4] != "מסמך")]
+    seen = set()
+    cleaned = []
+    for event in events:
+        key = (str(event[2]), str(event[6] if len(event) > 6 else ""))
+        if key not in seen:
+            seen.add(key); cleaned.append(event)
+    events = cleaned
+    changed = len(events) != before
     trips_changed = False
     for trip in trips:
         hotel = trip.get("hotel") or ""
         if not hotel and trip.get("document"):
             candidates = list(UPLOADS.glob("*" + Path(trip["document"]).name)) + list(UPLOADS.glob("*" + Path(trip["document"]).stem + "*"))
             for candidate in candidates:
-                text = extract_pdf_text(candidate)
-                hotel = extract_hotel_name(text)
+                hotel = extract_hotel_name(extract_pdf_text(candidate))
                 if hotel:
                     trip["hotel"] = hotel; trips_changed = True; break
         hotel = hotel or "המלון"
-        docs = trip.get("documents") or ([trip.get("document")] if trip.get("document") else [])
+        docs = list(dict.fromkeys(trip.get("documents") or ([trip.get("document")] if trip.get("document") else [])))
         titles = trip.get("document_titles", {})
         for doc in docs:
             if doc and doc not in titles:
                 titles[doc] = "Adina hotel voucher" if "Adina" in hotel else "אישור מלון"
                 trips_changed = True
-        if docs and trip.get("documents") != docs: trip["documents"] = docs; trips_changed = True
+        if trip.get("documents") != docs: trip["documents"] = docs; trips_changed = True
         if trip.get("document_titles") != titles: trip["document_titles"] = titles; trips_changed = True
         for event in events:
             if len(event) >= 3 and event[2].startswith("צ׳ק-") and "המלון" in event[2]:
                 event[2] = event[2].replace("המלון", hotel); changed = True
-        if trip.get("start") and not any(x.startswith("צ׳ק-אין ·") for x in existing):
-            events.insert(0, [trip.get("checkin_time", "14:00"), ICONS["מלון"], "צ׳ק-אין · " + hotel, f"{trip['start']} · שעה: {trip.get('checkin_time', '14:00')}", "מלון", "PDF", trip["start"]])
-            changed = True
-        if trip.get("end") and trip.get("end") != trip.get("start") and not any(x.startswith("צ׳ק-אאוט ·") for x in existing):
-            events.insert(0, [trip.get("checkout_time", "11:00"), ICONS["מלון"], "צ׳ק-אאוט · " + hotel, f"{trip['end']} · שעה: {trip.get('checkout_time', '11:00')}", "מלון", "PDF", trip["end"]])
-            changed = True
+        if trip.get("start"):
+            key = ("צ׳ק-אין · " + hotel, trip["start"])
+            if key not in seen:
+                events.insert(0, [trip.get("checkin_time", "14:00"), ICONS["מלון"], key[0], f"{trip['start']} · שעה: {trip.get('checkin_time', '14:00')}", "מלון", "PDF", trip["start"]]); seen.add(key); changed = True
+        if trip.get("end") and trip.get("end") != trip.get("start"):
+            key = ("צ׳ק-אאוט · " + hotel, trip["end"])
+            if key not in seen:
+                events.insert(0, [trip.get("checkout_time", "11:00"), ICONS["מלון"], key[0], f"{trip['end']} · שעה: {trip.get('checkout_time', '11:00')}", "מלון", "PDF", trip["end"]]); seen.add(key); changed = True
     if trips_changed: save_trips(trips)
     if changed: save_events(events)
     return events
@@ -270,8 +280,6 @@ def handle_message(message):
             with urllib.request.urlopen(download_url, timeout=60) as response: local.write_bytes(response.read())
             trip = create_trip_from_document(name, local)
             title = trip["title"]
-            summary = next(iter(trip.get("document_titles", {}).values()), "אישור הזמנה")
-            add_event("מסמך · " + summary, "התקבל דרך Telegram ונשמר בטיול", "מסמך")
             if trip.get("start"):
                 add_event("צ׳ק-אין · " + (trip.get("hotel") or title), f"{trip['start']} · שעה: {trip.get('checkin_time', '14:00')}", "מלון", event_time=trip.get("checkin_time", "14:00"))
             if trip.get("end") and trip.get("end") != trip.get("start"):
