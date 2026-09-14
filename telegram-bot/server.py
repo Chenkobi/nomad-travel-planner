@@ -57,10 +57,10 @@ def extract_pdf_text(path):
 
 def create_trip_from_document(filename, path, source="Telegram"):
     text = extract_pdf_text(path)
-    known = [("מינכן", "גרמניה"), ("München", "גרמניה"), ("Munich", "גרמניה"), ("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
+    known = [("מינכן", "גרמניה"), ("München", "גרמניה"), ("Munich", "גרמניה"), ("פרנקפורט", "גרמניה"), ("Frankfurt", "גרמניה"), ("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
     cities = []
     for city, country in known:
-        if city.lower() in text.lower() and country not in [x[1] for x in cities]: cities.append((city, country))
+        if city.lower() in text.lower() and city not in [x[0] for x in cities]: cities.append((city, country))
     dates = re.findall(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b", text)
     if not dates:
         dates = re.findall(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})\b", text)
@@ -71,13 +71,49 @@ def create_trip_from_document(filename, path, source="Telegram"):
     months = {"JAN":"01","FEB":"02","MAR":"03","APR":"04","MAY":"05","JUN":"06","JUL":"07","AUG":"08","SEP":"09","OCT":"10","NOV":"11","DEC":"12"}
     text_dates = re.findall(r"\b(MON|TUE|WED|THU|FRI|SAT|SUN|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{1,2}),?\s+(20\d{2})\b", text, re.I)
     if text_dates: dates += [(y, months[m[:3].upper()], d.zfill(2)) for m, d, y in text_dates]
+    label_dates = re.findall(r"check[- ]?in\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{1,2}),?\s+(20\d{2})", text, re.I) + re.findall(r"check[- ]?out\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{1,2}),?\s+(20\d{2})", text, re.I)
+    if label_dates: dates = [(y, months[m[:3].upper()], d.zfill(2)) for m, d, y in label_dates]
     start = "-".join(dates[0]) if dates else ""
     end = "-".join(dates[-1]) if len(dates) > 1 else start
     title = (" · ".join(dict.fromkeys(x[1] for x in cities)) + (" · " + " · ".join(dict.fromkeys(x[0] for x in cities)) if cities else "")) or Path(filename).stem or "טיול חדש"
-    title = title.replace("Munich", "מינכן").replace("München", "מינכן")
-    image = "https://images.unsplash.com/photo-1595867818082-083862f3d630?auto=format&fit=crop&w=1200&q=80" if any(x[1] == "גרמניה" for x in cities) else "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"
-    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": len(dates) if dates else 0, "source": source, "document": filename, "image": image}
-    trips = load_trips(); trips.insert(0, trip); save_trips(trips)
+    title = title.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט")
+    image_by_city = {"מינכן": "https://images.unsplash.com/photo-1595867818082-083862f3d630?auto=format&fit=crop&w=1200&q=80", "פרנקפורט": "https://images.unsplash.com/photo-1520699049698-acd2fccb8cc8?auto=format&fit=crop&w=1200&q=80"}
+    images = list(dict.fromkeys(image_by_city.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80") for city, _ in cities)) or ["https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"]
+    image = images[0]
+    destinations = [{"city": city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), "country": country, "image": image_by_city.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), image)} for city, country in cities]
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": [image], "destinations": destinations}
+    if start and end:
+        trip["days"] = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
+    trips = load_trips()
+    def as_date(value):
+        try: return datetime.fromisoformat(value).date()
+        except (TypeError, ValueError): return None
+    new_start, new_end = as_date(start), as_date(end)
+    match = None
+    if new_start and new_end:
+        for existing in trips:
+            old_start, old_end = as_date(existing.get("start")), as_date(existing.get("end"))
+            if not old_start or not old_end: continue
+            gap = max((new_start - old_end).days, (old_start - new_end).days, 0)
+            if gap <= 14:
+                match = existing; break
+    if match:
+        merged_start = min(as_date(match.get("start")), new_start)
+        merged_end = max(as_date(match.get("end")), new_end)
+        destinations = match.get("destinations", []) + destinations
+        unique = {(d.get("city"), d.get("country")): d for d in destinations}
+        match["destinations"] = list(unique.values())
+        countries = list(dict.fromkeys(d["country"] for d in match["destinations"]))
+        cities_text = list(dict.fromkeys(d["city"] for d in match["destinations"]))
+        match["title"] = " · ".join(countries + cities_text)
+        match["start"], match["end"] = merged_start.isoformat(), merged_end.isoformat()
+        match["days"] = (merged_end - merged_start).days + 1
+        match["images"] = list(dict.fromkeys(match.get("images", [match.get("image")] if match.get("image") else []) + [image]))
+        match["image"] = match["images"][0]
+        match["documents"] = list(dict.fromkeys(match.get("documents", [match.get("document")] if match.get("document") else []) + [filename]))
+        save_trips(trips)
+        return match
+    trips.insert(0, trip); save_trips(trips)
     return trip
 
 def delete_trip(trip_id):
