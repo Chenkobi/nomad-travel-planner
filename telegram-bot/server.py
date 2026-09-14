@@ -247,7 +247,7 @@ def ensure_hotel_events():
         if trip.get("destinations"):
             countries = list(dict.fromkeys(d.get("country", "") for d in trip["destinations"] if d.get("country")))
             cities = list(dict.fromkeys(d.get("city", "") for d in trip["destinations"] if d.get("city")))
-            normalized_title = " · ".join(countries + cities)
+            normalized_title = " · ".join(countries)
             if normalized_title and trip.get("title") != normalized_title: trip["title"] = normalized_title; trips_changed = True
         hotel = trip.get("hotel") or ""
         if not hotel and trip.get("document"):
