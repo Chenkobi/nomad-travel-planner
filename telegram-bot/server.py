@@ -550,7 +550,7 @@ class Handler(BaseHTTPRequestHandler):
             trip_id = urllib.parse.unquote(self.path[len(prefix):]); trips = load_trips()
             for trip in trips:
                 if str(trip.get("id")) == trip_id:
-                    for key in ("hotel", "title", "start", "end", "days"):
+                    for key in ("hotel", "title", "start", "end", "days", "hotels", "flights", "trains", "attractions", "rentals"):
                         if key in payload: trip[key] = payload[key]
                     save_trips(trips); self._json(200, {"trip": trip}); return
             self._json(404, {"error": "trip_not_found"})
