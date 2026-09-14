@@ -294,7 +294,7 @@ def ensure_hotel_events():
     trips = load_trips()
     before = len(events)
     demo_markers = ("LX 162", "Ruby Mimi", "רכבת לציריך", "אישור חדש")
-    events = [e for e in events if len(e) < 5 or (e[2] not in demo_markers and e[4] != "מסמך")]
+    events = [e for e in events if len(e) < 5 or (e[2] not in demo_markers and e[4] != "מסמך" and not (e[4] == "מלון" and not str(e[6] if len(e) > 6 else "").strip()))]
     seen = set()
     seen_hotel_dates = set()
     cleaned = []
