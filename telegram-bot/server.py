@@ -72,7 +72,11 @@ def create_trip_from_document(filename, path, source="Telegram"):
     text_dates = re.findall(r"\b(MON|TUE|WED|THU|FRI|SAT|SUN|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{1,2}),?\s+(20\d{2})\b", text, re.I)
     if text_dates: dates += [(y, months[m[:3].upper()], d.zfill(2)) for m, d, y in text_dates]
     label_dates = re.findall(r"check[- ]?in\s*[:\-]?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{1,2}),?\s+(20\d{2})", text, re.I) + re.findall(r"check[- ]?out\s*[:\-]?\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{1,2}),?\s+(20\d{2})", text, re.I)
-    if label_dates: dates = [(y, months[m[:3].upper()], d.zfill(2)) for m, d, y in label_dates]
+    table_dates = re.findall(r"check[- ]?in\s+check[- ]?out[\s\S]{0,120}?(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{1,2}),?\s+(20\d{2})\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(\d{1,2}),?\s+(20\d{2})", text, re.I)
+    if table_dates:
+        m1, d1, y1, m2, d2, y2 = table_dates[0]
+        dates = [(y1, months[m1[:3].upper()], d1.zfill(2)), (y2, months[m2[:3].upper()], d2.zfill(2))]
+    elif label_dates: dates = [(y, months[m[:3].upper()], d.zfill(2)) for m, d, y in label_dates]
     start = "-".join(dates[0]) if dates else ""
     end = "-".join(dates[-1]) if len(dates) > 1 else start
     title = (" · ".join(dict.fromkeys(x[1] for x in cities)) + (" · " + " · ".join(dict.fromkeys(x[0] for x in cities)) if cities else "")) or Path(filename).stem or "טיול חדש"
