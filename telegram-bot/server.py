@@ -85,7 +85,9 @@ def create_trip_from_document(filename, path, source="Telegram"):
     images = list(dict.fromkeys(image_by_city.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80") for city, _ in cities)) or ["https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"]
     image = images[0]
     destinations = [{"city": city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), "country": country, "image": image_by_city.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), image)} for city, country in cities]
-    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": [image], "destinations": destinations}
+    hotel_match = re.search(r"(?:Adina Apartment Hotel[^\n]+|[A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+){0,5} Hotel[^\n]*)", text)
+    hotel = hotel_match.group(0).strip() if hotel_match else ""
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": images, "destinations": destinations, "hotel": hotel, "document_titles": {filename: ("אישור מלון · " + hotel if hotel else "אישור הזמנה") + (f" · {start}–{end}" if start and end else "")}}
     if start and end:
         trip["days"] = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
     trips = load_trips()
@@ -116,6 +118,8 @@ def create_trip_from_document(filename, path, source="Telegram"):
         match["images"] = list(dict.fromkeys(match.get("images", [match.get("image")] if match.get("image") else []) + [image]))
         match["image"] = match["images"][0]
         match["documents"] = list(dict.fromkeys(match.get("documents", [match.get("document")] if match.get("document") else []) + [filename]))
+        match["document_titles"] = {**match.get("document_titles", {}), **trip["document_titles"]}
+        if hotel: match["hotel"] = hotel
         save_trips(trips)
         return match
     trips.insert(0, trip); save_trips(trips)
@@ -138,9 +142,9 @@ def api(method, payload=None):
 def send(chat_id, text):
     api("sendMessage", {"chat_id": chat_id, "text": text})
 
-def add_event(title, details, kind, source="Telegram"):
+def add_event(title, details, kind, source="Telegram", event_time=None):
     events = load_events()
-    now = datetime.now().strftime("%H:%M")
+    now = event_time or datetime.now().strftime("%H:%M")
     event = [now, ICONS.get(kind, "📌"), title, details, kind, source]
     events.insert(0, event)
     save_events(events)
@@ -170,8 +174,13 @@ def handle_message(message):
             with urllib.request.urlopen(download_url, timeout=60) as response: local.write_bytes(response.read())
             trip = create_trip_from_document(name, local)
             title = trip["title"]
-            add_event("טיול חדש · " + title, "נוצר אוטומטית מ־" + name, "מסמך")
-            send(chat, f"קיבלתי את {name} ✅\\nנוצר טיול חדש: {title}")
+            summary = next(iter(trip.get("document_titles", {}).values()), "אישור הזמנה")
+            add_event("מסמך · " + summary, "התקבל דרך Telegram ונשמר בטיול", "מסמך")
+            if trip.get("start"):
+                add_event("צ׳ק-אין · " + (trip.get("hotel") or title), "תחילת השהייה", "מלון", event_time=trip["start"])
+            if trip.get("end") and trip.get("end") != trip.get("start"):
+                add_event("צ׳ק-אאוט · " + (trip.get("hotel") or title), "סיום השהייה", "מלון", event_time=trip["end"])
+            send(chat, f"קיבלתי את {name} ✅\\nעודכן הטיול: {title}")
         except Exception as exc:
             print("Document processing error:", exc, flush=True)
             add_event("מסמך חדש · " + name, "התקבל דרך Telegram · ממתין לעיבוד", "מסמך")
@@ -208,6 +217,12 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/events": self._json(200, {"events": load_events()}); return
         if path == "/api/trips": self._json(200, {"trips": load_trips()}); return
+        if path.startswith("/api/documents/"):
+            filename = Path(urllib.parse.unquote(path[len("/api/documents/"):])).name
+            file_path = UPLOADS / filename
+            if file_path.exists() and file_path.is_file():
+                raw = file_path.read_bytes(); self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Disposition", "inline; filename*=UTF-8''" + urllib.parse.quote(filename)); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
+            self._json(404, {"error": "document_not_found"}); return
         if path in ("/", "/index.html"):
             raw = (ROOT / "index.html").read_bytes(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         static = {"/tripy-icon.png": (ROOT / "tripy-icon.png", "image/png"), "/manifest.webmanifest": (ROOT / "manifest.webmanifest", "application/manifest+json")}
