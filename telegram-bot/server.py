@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Small dependency-free TRIPY Telegram bridge for the working travel version."""
-import json, os, threading, time, urllib.parse, urllib.request
+import json, os, re, shutil, subprocess, tempfile, threading, time, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.getenv("TRIPY_DATA_FILE", ROOT / "trip-data.json"))
+TRIPS = DATA.with_name("trips.json")
 UPLOADS = Path(os.getenv("TRIPY_UPLOAD_DIR", ROOT / "trip-uploads"))
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ALLOWED_CHAT = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
@@ -25,6 +26,46 @@ def save_events(events):
     tmp = DATA.with_suffix(".tmp")
     tmp.write_text(json.dumps(events, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(DATA)
+
+def load_trips():
+    if not TRIPS.exists(): return []
+    try: return json.loads(TRIPS.read_text(encoding="utf-8"))
+    except (ValueError, OSError): return []
+
+def save_trips(trips):
+    tmp = TRIPS.with_suffix(".tmp")
+    tmp.write_text(json.dumps(trips, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(TRIPS)
+
+def extract_pdf_text(path):
+    try:
+        result = subprocess.run(["pdftotext", str(path), "-"], capture_output=True, text=True, timeout=20)
+        if result.returncode == 0: return result.stdout
+    except (OSError, subprocess.SubprocessError): pass
+    try: return path.read_bytes().decode("utf-8", errors="ignore")
+    except OSError: return ""
+
+def create_trip_from_document(filename, path, source="Telegram"):
+    text = extract_pdf_text(path)
+    known = [("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
+    cities = []
+    for city, country in known:
+        if city.lower() in text.lower() and country not in [x[1] for x in cities]: cities.append((city, country))
+    dates = re.findall(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b", text)
+    if not dates:
+        dates = re.findall(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})\b", text)
+        dates = [(y, m, d) for d, m, y in dates]
+    start = "-".join(dates[0]) if dates else ""
+    end = "-".join(dates[-1]) if len(dates) > 1 else start
+    title = " · ".join(dict.fromkeys(x[0] for x in cities)) or Path(filename).stem or "טיול חדש"
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": len(dates) if dates else 0, "source": source, "document": filename}
+    trips = load_trips(); trips.insert(0, trip); save_trips(trips)
+    return trip
+
+def delete_trip(trip_id):
+    trips = [t for t in load_trips() if str(t.get("id")) != str(trip_id)]
+    save_trips(trips)
+    return trips
 
 def api(method, payload=None):
     url = f"https://api.telegram.org/bot{TOKEN}/{method}"
@@ -63,9 +104,19 @@ def handle_message(message):
         item = message.get("document") or message.get("photo", [{}])[-1]
         name = item.get("file_name", "telegram-photo")
         UPLOADS.mkdir(parents=True, exist_ok=True)
-        # Store metadata now; downloading can be enabled after deployment storage is configured.
-        add_event("מסמך חדש · " + name, "התקבל דרך Telegram · זמין לעיבוד", "מסמך")
-        send(chat, f"קיבלתי את {name} ✅\nנוסף למסמכי הטיול.")
+        local = UPLOADS / (datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S_") + Path(name).name)
+        try:
+            file_info = api("getFile", {"file_id": item["file_id"]})
+            download_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info['file_path']}"
+            with urllib.request.urlopen(download_url, timeout=60) as response: local.write_bytes(response.read())
+            trip = create_trip_from_document(name, local)
+            title = trip["title"]
+            add_event("טיול חדש · " + title, "נוצר אוטומטית מ־" + name, "מסמך")
+            send(chat, f"קיבלתי את {name} ✅\\nנוצר טיול חדש: {title}")
+        except Exception as exc:
+            print("Document processing error:", exc, flush=True)
+            add_event("מסמך חדש · " + name, "התקבל דרך Telegram · ממתין לעיבוד", "מסמך")
+            send(chat, f"קיבלתי את {name} ✅\\nהמסמך נשמר, אבל לא הצלחתי לחלץ ממנו את פרטי הטיול.")
         return
     if not text:
         send(chat, "שלח טקסט עם פרטי הזמנה או קובץ.")
@@ -95,11 +146,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
     def do_OPTIONS(self): self.send_response(204); self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS"); self.end_headers()
     def do_GET(self):
-        if self.path.split("?", 1)[0] == "/api/events": self._json(200, {"events": load_events()}); return
-        if self.path in ("/", "/index.html"):
+        path = self.path.split("?", 1)[0]
+        if path == "/api/events": self._json(200, {"events": load_events()}); return
+        if path == "/api/trips": self._json(200, {"trips": load_trips()}); return
+        if path in ("/", "/index.html"):
             raw = (ROOT / "index.html").read_bytes(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         self._json(404, {"error": "not_found"})
-    def log_message(self, format, *args): pass
+    def do_POST(self):
+        if self.path != "/api/trips": self._json(404, {"error": "not_found"}); return
+        try:
+            length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}")
+            trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": str(payload.get("title") or "טיול חדש")[:120], "start": str(payload.get("start") or ""), "end": str(payload.get("end") or ""), "days": int(payload.get("days") or 0), "source": "Web"}
+            trips = load_trips(); trips.insert(0, trip); save_trips(trips); self._json(201, {"trip": trip})
+        except (ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error": "invalid_json"})
+    def do_DELETE(self):
+        prefix = "/api/trips/"
+        if not self.path.startswith(prefix): self._json(404, {"error": "not_found"}); return
+        self._json(200, {"trips": delete_trip(self.path[len(prefix):])})
 
 def main():
     if not TOKEN: raise SystemExit("Set TELEGRAM_BOT_TOKEN before starting TRIPY bot")
