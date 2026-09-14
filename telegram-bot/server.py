@@ -155,6 +155,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/trips": self._json(200, {"trips": load_trips()}); return
         if path in ("/", "/index.html"):
             raw = (ROOT / "index.html").read_bytes(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
+        static = {"/tripy-icon.png": (ROOT / "tripy-icon.png", "image/png"), "/manifest.webmanifest": (ROOT / "manifest.webmanifest", "application/manifest+json")}
+        if path in static:
+            file_path, content_type = static[path]
+            if file_path.exists():
+                raw = file_path.read_bytes(); self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         self._json(404, {"error": "not_found"})
     def do_POST(self):
         if self.path != "/api/trips": self._json(404, {"error": "not_found"}); return
