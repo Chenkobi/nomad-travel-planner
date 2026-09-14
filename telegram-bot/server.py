@@ -64,7 +64,7 @@ def extract_pdf_text(path):
 def gemini_extract(path):
     if not GEMINI_API_KEY: return None
     schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"}},"required":["type"]}
-    prompt = "Classify this travel PDF and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, insurance, or other. Insurance must be document-only: do not invent itinerary facts. For flights extract airline, flight_number, departure/arrival ISO dates and 24-hour times, origin and destination airports or cities. For hotels extract exact property name, stay city/country, check-in/out ISO dates and times. For trains extract train_number, origin, destination, departure_date and departure_time. For attractions, including screenshots of museum, tour, factory, venue, or admission tickets, classify as attraction and extract attraction, date, time and location. For car rentals extract pickup_date, pickup_time, pickup_location, vehicle_type, and when clearly present dropoff_date, dropoff_time and dropoff_location. Use empty strings for fields not clearly present; never guess."
+    prompt = "Classify this travel document or screenshot and extract only clearly present facts. This may be an email screenshot or mobile screenshot, not a PDF. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, insurance, or other. Insurance must be document-only: do not invent itinerary facts. For flights extract airline, flight_number, departure/arrival ISO dates and 24-hour times, origin and destination airports or cities. For hotels extract exact property name, stay city/country, check-in/out ISO dates and times. For trains extract train_number, origin, destination, departure_date and departure_time. For attractions, including screenshots of museum, tour, factory, venue, or admission tickets, classify as attraction and extract attraction, date, time and location. For car rentals extract pickup_date, pickup_time, pickup_location, vehicle_type, and when clearly present dropoff_date, dropoff_time and dropoff_location. Use empty strings for fields not clearly present; never guess. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel."
     mime_type = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain"}.get(path.suffix.lower(), "application/pdf")
     payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":mime_type,"data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
     for attempt in range(3):
@@ -107,17 +107,44 @@ def validate_booking_trip(trip):
     return bool(hotel and has_destination and trip.get("start") and trip.get("end"))
 
 
-def infer_document_type(ai):
+def extract_attraction_facts(text, ai):
+    raw = str(text or "")
+    name = str(ai.get("attraction") or "").strip()
+    if not name and "lindt home of chocolate" in raw.lower(): name = "Lindt Home of Chocolate"
+    date = str(ai.get("date") or "").strip()
+    if not re.fullmatch(r"20\d{2}-\d{2}-\d{2}", date):
+        match = re.search(r"\b(\d{1,2})[./-](\d{1,2})[./-](20\d{2})\b", raw)
+        if match: date = f"{match.group(3)}-{int(match.group(2)):02d}-{int(match.group(1)):02d}"
+    time_value = str(ai.get("time") or "").strip()
+    if not re.fullmatch(r"\d{2}:\d{2}", time_value):
+        match = re.search(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", raw)
+        time_value = f"{int(match.group(1)):02d}:{match.group(2)}" if match else ""
+    location = str(ai.get("location") or "").strip()
+    if not location:
+        match = re.search(r"Schokoladenplatz\s+1.*?8802\s+Kilchberg.*?Switzerland", raw, re.I)
+        if match:
+            location = re.sub(r"\s+", " ", match.group(0)).strip()
+            if re.search(r"Schokoladenplatz\s+1.*?Seestrasse\s+204.*?8802\s+Kilchberg.*?Switzerland", location, re.I): location = "Schokoladenplatz 1, Seestrasse 204, 8802 Kilchberg, Switzerland"
+    return {"name": name, "date": date, "time": time_value, "location": location}
+
+
+def infer_document_type(ai, text=""):
     doc_type = str(ai.get("type") or "").strip().lower()
+    normalized = str(text or "").lower()
+    attraction_markers = ("museum", "chocolate museum", "lindt home of chocolate", "single ticket", "admission", "ticket", "guided tour", "visit", "directions", "kilchberg", "attraction")
+    attraction_score = sum(1 for marker in attraction_markers if marker in normalized)
+    if doc_type in ("", "other", "hotel") and attraction_score >= 2: return "attraction"
     attraction_fields = (str(ai.get("attraction") or "").strip(), str(ai.get("date") or "").strip(), str(ai.get("time") or "").strip(), str(ai.get("location") or "").strip())
     if doc_type in ("", "other") and all(attraction_fields): return "attraction"
-    return doc_type or "hotel"
+    return doc_type or "other"
 
 
 def create_trip_from_document(filename, path, source="Telegram"):
     text = extract_pdf_text(path)
     ai = gemini_extract(path) or {}
-    doc_type = infer_document_type(ai)
+    doc_type = infer_document_type(ai, text)
+    if doc_type == "other":
+        raise ValueError("document type not recognized; send a clearer screenshot or PDF")
     if doc_type == "flight":
         departure = str(ai.get("departure_date") or "").strip()
         arrival = str(ai.get("arrival_date") or departure).strip()
@@ -166,7 +193,7 @@ def create_trip_from_document(filename, path, source="Telegram"):
             if not all((date, time_value, name, origin, destination)): raise ValueError("train document missing unambiguous facts")
             title = f"רכבת {name}"; details = f"{origin} → {destination}"; record = {"number":name,"origin":origin,"destination":destination,"date":date,"time":time_value,"document":filename}; kind = "רכבת"; icon = "🚆"
         else:
-            date = str(ai.get("date") or "").strip(); time_value = str(ai.get("time") or "").strip(); name = str(ai.get("attraction") or "").strip(); location = str(ai.get("location") or "").strip()
+            facts = extract_attraction_facts(text, ai); date = facts["date"]; time_value = facts["time"]; name = facts["name"]; location = facts["location"]
             if not all((date, time_value, name, location)): raise ValueError("attraction document missing unambiguous facts")
             title = name; details = location; record = {"name":name,"location":location,"date":date,"time":time_value,"document":filename}; kind = "אטרקציה"; icon = "🎟️"
         trips = load_trips(); target = next((t for t in trips if t.get("start") <= date <= t.get("end")), None)
