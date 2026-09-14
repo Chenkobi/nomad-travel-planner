@@ -55,6 +55,13 @@ def extract_pdf_text(path):
     try: return path.read_bytes().decode("utf-8", errors="ignore")
     except OSError: return ""
 
+def validate_booking_trip(trip):
+    hotel = str(trip.get("hotel") or "").strip()
+    destinations = trip.get("destinations") or []
+    has_destination = any(str(item.get("city") or "").strip() for item in destinations if isinstance(item, dict))
+    return bool(hotel and has_destination and trip.get("start") and trip.get("end"))
+
+
 def create_trip_from_document(filename, path, source="Telegram"):
     text = extract_pdf_text(path)
     known = [("מינכן", "גרמניה"), ("München", "גרמניה"), ("Munich", "גרמניה"), ("פרנקפורט", "גרמניה"), ("Frankfurt", "גרמניה"), ("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
@@ -90,6 +97,8 @@ def create_trip_from_document(filename, path, source="Telegram"):
     trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": images, "destinations": destinations, "hotel": hotel, "document_titles": {filename: ("אישור מלון · " + hotel if hotel else "אישור הזמנה") + (f" · {start}–{end}" if start and end else "")}}
     if start and end:
         trip["days"] = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
+    if not validate_booking_trip(trip):
+        raise ValueError("missing hotel, destination, or dates")
     trips = load_trips()
     def as_date(value):
         try: return datetime.fromisoformat(value).date()
@@ -210,8 +219,7 @@ def handle_message(message):
             send(chat, f"קיבלתי את {name} ✅\\nעודכן הטיול: {title}")
         except Exception as exc:
             print("Document processing error:", exc, flush=True)
-            add_event("מסמך חדש · " + name, "התקבל דרך Telegram · ממתין לעיבוד", "מסמך")
-            send(chat, f"קיבלתי את {name} ✅\\nהמסמך נשמר, אבל לא הצלחתי לחלץ ממנו את פרטי הטיול.")
+            send(chat, f"יש בעיה בזיהוי האישור ❌\nלא עודכן הלוז. צריך לזהות בוודאות שם מלון, יעד ותאריכים.")
         return
     if not text:
         send(chat, "שלח טקסט עם פרטי הזמנה או קובץ.")
