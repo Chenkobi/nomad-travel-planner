@@ -295,15 +295,11 @@ def ensure_hotel_events():
     before = len(events)
     demo_markers = ("LX 162", "Ruby Mimi", "רכבת לציריך", "אישור חדש")
     events = [e for e in events if len(e) < 5 or (e[2] not in demo_markers and e[4] != "מסמך" and not (e[4] == "מלון" and not str(e[6] if len(e) > 6 else "").strip()))]
+    events = [e for e in events if len(e) < 5 or (e[2] not in demo_markers and e[4] != "מסמך" and e[4] != "מלון")]
     seen = set()
-    seen_hotel_dates = set()
     cleaned = []
     for event in events:
         event_date = str(event[6] if len(event) > 6 else "")
-        if len(event) > 6 and event[4] == "מלון" and event_date:
-            hotel_key = ("out" if "אאוט" in str(event[2]) else "in", event_date)
-            if hotel_key in seen_hotel_dates: continue
-            seen_hotel_dates.add(hotel_key)
         key = (str(event[2]), event_date)
         if key not in seen:
             seen.add(key); cleaned.append(event)
@@ -365,17 +361,18 @@ def ensure_hotel_events():
         docs = list(reversed(unique_docs))
         if trip.get("documents") != docs: trip["documents"] = docs; trips_changed = True
         if trip.get("document_titles") != titles: trip["document_titles"] = titles; trips_changed = True
-        for event in events:
-            if len(event) >= 3 and event[2].startswith("צ׳ק-") and "המלון" in event[2]:
-                event[2] = event[2].replace("המלון", hotel); changed = True
-        if trip.get("start"):
-            key = ("צ׳ק-אין · " + hotel, trip["start"])
-            if key not in seen:
-                events.insert(0, [trip.get("checkin_time", "14:00"), ICONS["מלון"], key[0], f"{trip['start']} · שעה: {trip.get('checkin_time', '14:00')}", "מלון", "PDF", trip["start"]]); seen.add(key); changed = True
-        if trip.get("end") and trip.get("end") != trip.get("start"):
-            key = ("צ׳ק-אאוט · " + hotel, trip["end"])
-            if key not in seen:
-                events.insert(0, [trip.get("checkout_time", "11:00"), ICONS["מלון"], key[0], f"{trip['end']} · שעה: {trip.get('checkout_time', '11:00')}", "מלון", "PDF", trip["end"]]); seen.add(key); changed = True
+        for booking in trip.get("hotels", []):
+            booking_hotel = booking.get("name") or hotel
+            booking_start = booking.get("start")
+            booking_end = booking.get("end")
+            if booking_start:
+                key = ("צ׳ק-אין · " + booking_hotel, booking_start)
+                if key not in seen:
+                    events.insert(0, [booking.get("checkin_time", "14:00"), ICONS["מלון"], key[0], f"{booking_start} · שעה: {booking.get('checkin_time', '14:00')}", "מלון", "PDF", booking_start]); seen.add(key); changed = True
+            if booking_end and booking_end != booking_start:
+                key = ("צ׳ק-אאוט · " + booking_hotel, booking_end)
+                if key not in seen:
+                    events.insert(0, [booking.get("checkout_time", "11:00"), ICONS["מלון"], key[0], f"{booking_end} · שעה: {booking.get('checkout_time', '11:00')}", "מלון", "PDF", booking_end]); seen.add(key); changed = True
     if trips_changed: save_trips(trips)
     if changed: save_events(events)
     return events
