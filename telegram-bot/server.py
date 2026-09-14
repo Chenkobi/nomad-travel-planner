@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Small dependency-free TRIPY Telegram bridge for the working travel version."""
-import base64, json, os, re, shutil, subprocess, tempfile, threading, time, urllib.parse, urllib.request
+import base64, json, os, re, shutil, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -69,6 +69,9 @@ def gemini_extract(path):
         text = body["candidates"][0]["content"]["parts"][0]["text"]
         result = json.loads(text)
         return result if isinstance(result, dict) else None
+    except urllib.error.HTTPError as exc:
+        print("Gemini extraction HTTP error:", exc.code, flush=True)
+        return None
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         print("Gemini extraction error:", type(exc).__name__, flush=True)
         return None
