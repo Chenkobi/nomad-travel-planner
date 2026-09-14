@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Small dependency-free TRIPY Telegram bridge for the working travel version."""
-import json, os, re, shutil, subprocess, tempfile, threading, time, urllib.parse, urllib.request
+import base64, json, os, re, shutil, subprocess, tempfile, threading, time, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -12,6 +12,8 @@ UPLOADS = Path(os.getenv("TRIPY_UPLOAD_DIR", ROOT / "trip-uploads"))
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 ALLOWED_CHAT = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
 PORT = int(os.getenv("PORT", "8787"))
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 OFFSET = 0
 LOCK = threading.Lock()
 
@@ -55,6 +57,38 @@ def extract_pdf_text(path):
     try: return path.read_bytes().decode("utf-8", errors="ignore")
     except OSError: return ""
 
+def gemini_extract(path):
+    if not GEMINI_API_KEY: return None
+    schema = {"type":"object","properties":{"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"}},"required":["hotel","city","country","check_in","check_out","check_in_time","check_out_time"]}
+    prompt = "Extract the booking facts from this PDF. Return only JSON matching the schema. Use ISO dates YYYY-MM-DD and 24-hour times HH:MM. Do not guess: use an empty string for any field that is not clearly present. hotel must be the exact property name; city and country must be the actual stay location."
+    payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":"application/pdf","data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
+    try:
+        req = urllib.request.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent", data=json.dumps(payload).encode(), headers={"Content-Type":"application/json","x-goog-api-key":GEMINI_API_KEY}, method="POST")
+        with urllib.request.urlopen(req, timeout=90) as response:
+            body = json.loads(response.read())
+        text = body["candidates"][0]["content"]["parts"][0]["text"]
+        result = json.loads(text)
+        return result if isinstance(result, dict) else None
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        print("Gemini extraction error:", type(exc).__name__, flush=True)
+        return None
+
+
+def extract_hotel_name(text):
+    patterns = [
+        r"Adina Apartment Hotel[^\n]+",
+        r"Hotel\s+[A-Z][A-Za-zÀ-ÿ]+(?:[ ,&'-]+[A-Za-zÀ-ÿ]+){0,8}",
+        r"[A-Z][A-Za-zÀ-ÿ]+(?:[ ,&'-]+[A-Za-zÀ-ÿ]+){0,5}\s+(?:Hotel|Meliá|Melia)(?:[ ,&'-]+[A-Za-zÀ-ÿ]+){0,5}"
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.I)
+        if match:
+            value = match.group(0).strip()
+            if value.lower() not in {"hotel's local time", "hotel's local time fee"}:
+                return value
+    return ""
+
+
 def validate_booking_trip(trip):
     hotel = str(trip.get("hotel") or "").strip()
     destinations = trip.get("destinations") or []
@@ -64,10 +98,16 @@ def validate_booking_trip(trip):
 
 def create_trip_from_document(filename, path, source="Telegram"):
     text = extract_pdf_text(path)
-    known = [("מינכן", "גרמניה"), ("München", "גרמניה"), ("Munich", "גרמניה"), ("פרנקפורט", "גרמניה"), ("Frankfurt", "גרמניה"), ("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
+    ai = gemini_extract(path) or {}
+    known = [("Budapest", "הונגריה"), ("בודפשט", "הונגריה"), ("מינכן", "גרמניה"), ("München", "גרמניה"), ("Munich", "גרמניה"), ("פרנקפורט", "גרמניה"), ("Frankfurt", "גרמניה"), ("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
+    ai_city, ai_country = str(ai.get("city") or "").strip(), str(ai.get("country") or "").strip()
+    if ai_city:
+        known_city = next((pair for pair in known if pair[0].lower() == ai_city.lower()), (ai_city, ai_country))
+        if known_city[0] not in [x[0] for x in known]: known.append(known_city)
     cities = []
     for city, country in known:
         if city.lower() in text.lower() and city not in [x[0] for x in cities]: cities.append((city, country))
+    if ai_city and not cities: cities.append((ai_city, ai_country))
     dates = re.findall(r"\b(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})\b", text)
     if not dates:
         dates = re.findall(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})\b", text)
@@ -84,6 +124,8 @@ def create_trip_from_document(filename, path, source="Telegram"):
         m1, d1, y1, m2, d2, y2 = table_dates[0]
         dates = [(y1, months[m1[:3].upper()], d1.zfill(2)), (y2, months[m2[:3].upper()], d2.zfill(2))]
     elif label_dates: dates = [(y, months[m[:3].upper()], d.zfill(2)) for m, d, y in label_dates]
+    ai_dates = [str(ai.get("check_in") or "").strip(), str(ai.get("check_out") or "").strip()]
+    if all(re.fullmatch(r"20\d{2}-\d{2}-\d{2}", value) for value in ai_dates): dates = [(value[:4], value[5:7], value[8:10]) for value in ai_dates]
     start = "-".join(dates[0]) if dates else ""
     end = "-".join(dates[-1]) if len(dates) > 1 else start
     title = (" · ".join(dict.fromkeys(x[1] for x in cities)) + (" · " + " · ".join(dict.fromkeys(x[0] for x in cities)) if cities else "")) or Path(filename).stem or "טיול חדש"
@@ -92,9 +134,10 @@ def create_trip_from_document(filename, path, source="Telegram"):
     images = list(dict.fromkeys(image_by_city.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80") for city, _ in cities)) or ["https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"]
     image = images[0]
     destinations = [{"city": city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), "country": country, "image": image_by_city.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), image)} for city, country in cities]
-    hotel_match = re.search(r"(?:Adina Apartment Hotel[^\n]+|[A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+){0,5} Hotel[^\n]*)", text)
-    hotel = hotel_match.group(0).strip() if hotel_match else ""
-    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": images, "destinations": destinations, "hotel": hotel, "document_titles": {filename: ("Adina hotel voucher" if "Adina Apartment Hotel" in hotel else ("אישור מלון" if hotel else "אישור הזמנה")) + (f" · {start}–{end}" if start and end else "")}}
+    hotel = str(ai.get("hotel") or "").strip() or extract_hotel_name(text)
+    checkin_time = str(ai.get("check_in_time") or "14:00").strip()
+    checkout_time = str(ai.get("check_out_time") or "11:00").strip()
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": images, "destinations": destinations, "hotel": hotel, "checkin_time": checkin_time, "checkout_time": checkout_time, "document_titles": {filename: ("Adina hotel voucher" if "Adina Apartment Hotel" in hotel else ("אישור מלון" if hotel else "אישור הזמנה")) + (f" · {start}–{end}" if start and end else "")}}
     if start and end:
         trip["days"] = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
     if not validate_booking_trip(trip):
@@ -171,9 +214,9 @@ def ensure_hotel_events():
             candidates = list(UPLOADS.glob("*" + Path(trip["document"]).name)) + list(UPLOADS.glob("*" + Path(trip["document"]).stem + "*"))
             for candidate in candidates:
                 text = extract_pdf_text(candidate)
-                match = re.search(r"(?:Adina Apartment Hotel[^\n]+|[A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+){0,5} Hotel[^\n]*)", text)
-                if match:
-                    hotel = match.group(0).strip(); trip["hotel"] = hotel; trips_changed = True; break
+                hotel = extract_hotel_name(text)
+                if hotel:
+                    trip["hotel"] = hotel; trips_changed = True; break
         hotel = hotel or "המלון"
         docs = trip.get("documents") or ([trip.get("document")] if trip.get("document") else [])
         titles = trip.get("document_titles", {})
@@ -187,10 +230,10 @@ def ensure_hotel_events():
             if len(event) >= 3 and event[2].startswith("צ׳ק-") and "המלון" in event[2]:
                 event[2] = event[2].replace("המלון", hotel); changed = True
         if trip.get("start") and not any(x.startswith("צ׳ק-אין ·") for x in existing):
-            events.insert(0, ["14:00", ICONS["מלון"], "צ׳ק-אין · " + hotel, f"{trip['start']} · ברירת מחדל למלון: 14:00", "מלון", "PDF"])
+            events.insert(0, [trip.get("checkin_time", "14:00"), ICONS["מלון"], "צ׳ק-אין · " + hotel, f"{trip['start']} · שעה: {trip.get('checkin_time', '14:00')}", "מלון", "PDF", trip["start"]])
             changed = True
         if trip.get("end") and trip.get("end") != trip.get("start") and not any(x.startswith("צ׳ק-אאוט ·") for x in existing):
-            events.insert(0, ["11:00", ICONS["מלון"], "צ׳ק-אאוט · " + hotel, f"{trip['end']} · ברירת מחדל למלון: 11:00", "מלון", "PDF"])
+            events.insert(0, [trip.get("checkout_time", "11:00"), ICONS["מלון"], "צ׳ק-אאוט · " + hotel, f"{trip['end']} · שעה: {trip.get('checkout_time', '11:00')}", "מלון", "PDF", trip["end"]])
             changed = True
     if trips_changed: save_trips(trips)
     if changed: save_events(events)
@@ -224,9 +267,9 @@ def handle_message(message):
             summary = next(iter(trip.get("document_titles", {}).values()), "אישור הזמנה")
             add_event("מסמך · " + summary, "התקבל דרך Telegram ונשמר בטיול", "מסמך")
             if trip.get("start"):
-                add_event("צ׳ק-אין · " + (trip.get("hotel") or title), f"{trip['start']} · ברירת מחדל למלון: 14:00", "מלון", event_time="14:00")
+                add_event("צ׳ק-אין · " + (trip.get("hotel") or title), f"{trip['start']} · שעה: {trip.get('checkin_time', '14:00')}", "מלון", event_time=trip.get("checkin_time", "14:00"))
             if trip.get("end") and trip.get("end") != trip.get("start"):
-                add_event("צ׳ק-אאוט · " + (trip.get("hotel") or title), f"{trip['end']} · ברירת מחדל למלון: 11:00", "מלון", event_time="11:00")
+                add_event("צ׳ק-אאוט · " + (trip.get("hotel") or title), f"{trip['end']} · שעה: {trip.get('checkout_time', '11:00')}", "מלון", event_time=trip.get("checkout_time", "11:00"))
             send(chat, f"קיבלתי את {name} ✅\\nעודכן הטיול: {title}")
         except Exception as exc:
             print("Document processing error:", exc, flush=True)
