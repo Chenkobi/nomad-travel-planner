@@ -445,6 +445,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/documents/"):
             filename = Path(urllib.parse.unquote(path[len("/api/documents/"):])).name
             file_path = UPLOADS / filename
+            if not file_path.exists():
+                candidates = sorted(UPLOADS.glob("*_" + filename), key=lambda p: p.stat().st_mtime, reverse=True)
+                file_path = candidates[0] if candidates else file_path
             if file_path.exists() and file_path.is_file():
                 raw = file_path.read_bytes(); self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Disposition", "inline; filename*=UTF-8''" + urllib.parse.quote(filename)); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
             self._json(404, {"error": "document_not_found"}); return
