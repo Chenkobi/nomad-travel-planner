@@ -201,7 +201,7 @@ def create_trip_from_document(filename, path, source="Telegram"):
     checkin_time = str(ai.get("check_in_time") or "14:00").strip()
     checkout_time = str(ai.get("check_out_time") or "11:00").strip()
     document_title = (f"אישור מלון · {hotel}" if hotel else "אישור הזמנה")
-    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "documents": [filename], "image": image, "images": images, "destinations": destinations, "hotel": hotel, "hotels": [{"name": hotel, "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "document": filename}], "checkin_time": checkin_time, "checkout_time": checkout_time, "document_titles": {filename: document_title}}
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "documents": [filename], "image": image, "images": images, "destinations": destinations, "hotel": hotel, "hotels": [{"name": hotel, "city": display_cities[0] if display_cities else ai_city, "country": ai_country or (cities[0][1] if cities else ""), "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "document": filename}], "checkin_time": checkin_time, "checkout_time": checkout_time, "document_titles": {filename: document_title}}
     if start and end:
         trip["days"] = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
     if not validate_booking_trip(trip):
@@ -250,7 +250,7 @@ def create_trip_from_document(filename, path, source="Telegram"):
         else:
             match["documents"] = list(dict.fromkeys(match.get("documents", [match.get("document")] if match.get("document") else []) + [filename]))
             match["document_titles"] = {**match.get("document_titles", {}), **trip["document_titles"]}
-        booking = {"name": hotel, "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "document": filename}
+        booking = {"name": hotel, "city": display_cities[0] if display_cities else ai_city, "country": ai_country or (cities[0][1] if cities else ""), "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "document": filename}
         existing_hotels = match.get("hotels") or ([{"name": match.get("hotel"), "start": match.get("start"), "end": match.get("end"), "checkin_time": match.get("checkin_time", "14:00"), "checkout_time": match.get("checkout_time", "11:00")} ] if match.get("hotel") else [])
         if same_booking:
             existing_hotels = [h for h in existing_hotels if not (h.get("start") == start and h.get("end") == end)] + [booking]
