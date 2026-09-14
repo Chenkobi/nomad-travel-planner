@@ -41,7 +41,11 @@ def save_trips(trips):
 
 def extract_pdf_text(path):
     text = ""
+    image_suffixes = {".jpg", ".jpeg", ".png", ".webp"}
     try:
+        if path.suffix.lower() in image_suffixes:
+            result = subprocess.run(["tesseract", str(path), "stdout", "-l", "eng"], capture_output=True, text=True, timeout=45)
+            return result.stdout if result.returncode == 0 else ""
         result = subprocess.run(["pdftotext", str(path), "-"], capture_output=True, text=True, timeout=20)
         if result.returncode == 0: text = result.stdout
     except (OSError, subprocess.SubprocessError): pass
@@ -61,7 +65,8 @@ def gemini_extract(path):
     if not GEMINI_API_KEY: return None
     schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"}},"required":["type","hotel","city","country","check_in","check_out","check_in_time","check_out_time","airline","flight_number","departure_date","departure_time","arrival_date","arrival_time","origin","destination"]}
     prompt = "Classify this travel PDF and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, insurance, or other. Insurance must be document-only: do not invent itinerary facts. For flights extract airline, flight_number, departure/arrival ISO dates and 24-hour times, origin and destination airports or cities. For hotels extract exact property name, stay city/country, check-in/out ISO dates and times. For trains extract train_number, origin, destination, departure_date and departure_time. For attractions extract attraction, date, time and location. For car rentals extract pickup_date, pickup_time, pickup_location, vehicle_type, and when clearly present dropoff_date, dropoff_time and dropoff_location. Use empty strings for fields not clearly present; never guess."
-    payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":"application/pdf","data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
+    mime_type = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain"}.get(path.suffix.lower(), "application/pdf")
+    payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":mime_type,"data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
     for attempt in range(3):
         try:
             req = urllib.request.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent", data=json.dumps(payload).encode(), headers={"Content-Type":"application/json","x-goog-api-key":GEMINI_API_KEY}, method="POST")
@@ -393,11 +398,14 @@ def handle_message(message):
         return
     if message.get("document") or message.get("photo"):
         item = message.get("document") or message.get("photo", [{}])[-1]
-        name = item.get("file_name", "telegram-photo")
+        name = item.get("file_name", "telegram-photo.jpg")
         UPLOADS.mkdir(parents=True, exist_ok=True)
-        local = UPLOADS / (datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S_") + Path(name).name)
         try:
             file_info = api("getFile", {"file_id": item["file_id"]})
+            remote_name = Path(file_info.get("file_path", "")).name
+            suffix = Path(remote_name).suffix or Path(name).suffix or ".jpg"
+            if not Path(name).suffix: name += suffix
+            local = UPLOADS / (datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S_") + Path(name).name)
             download_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info['file_path']}"
             with urllib.request.urlopen(download_url, timeout=60) as response: local.write_bytes(response.read())
             trip = create_trip_from_document(name, local)
@@ -413,6 +421,21 @@ def handle_message(message):
         return
     if not text:
         send(chat, "שלח טקסט עם פרטי הזמנה או קובץ.")
+        return
+    urls = re.findall(r"https?://[^\s]+", text)
+    if urls:
+        try:
+            request = urllib.request.Request(urls[0], headers={"User-Agent":"Mozilla/5.0"})
+            with urllib.request.urlopen(request, timeout=30) as response: page = response.read(500000).decode("utf-8", errors="ignore")
+            page = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>", " ", page)
+            page = re.sub(r"\s+", " ", page).strip()
+            with tempfile.NamedTemporaryFile("w", suffix=".txt", encoding="utf-8", delete=False) as tmp:
+                tmp.write(text + "\n" + page); shared_path = Path(tmp.name)
+            trip = create_trip_from_document("shared-booking.txt", shared_path)
+            send(chat, f"קיבלתי את הקישור ✅\nזוהה כ-{trip.get('_ingested_type', 'הזמנה')} ונוסף לטיול: {trip['title']}")
+        except Exception as exc:
+            print("Shared link processing error:", type(exc).__name__, flush=True)
+            send(chat, "קיבלתי קישור, אבל לא הצלחתי לזהות ממנו כרטיס טיסה. שלח צילום מסך או PDF של הכרטיס.")
         return
     kind = next((k for k in ICONS if k in text), "עדכון")
     title = text.split("\n", 1)[0][:90]
@@ -489,6 +512,14 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error": "invalid_json"})
 
     def do_DELETE(self):
+        if self.path.startswith("/api/events/"):
+            try:
+                index = int(urllib.parse.unquote(self.path[len("/api/events/"):]))
+                events = load_events()
+                if index < 0 or index >= len(events): self._json(404, {"error": "event_not_found"}); return
+                deleted = events.pop(index); save_events(events); self._json(200, {"event": deleted})
+            except ValueError: self._json(400, {"error": "invalid_event"})
+            return
         prefix = "/api/trips/"
         if not self.path.startswith(prefix): self._json(404, {"error": "not_found"}); return
         self._json(200, {"trips": delete_trip(self.path[len(prefix):])})
