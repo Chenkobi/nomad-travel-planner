@@ -62,19 +62,22 @@ def gemini_extract(path):
     schema = {"type":"object","properties":{"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"}},"required":["hotel","city","country","check_in","check_out","check_in_time","check_out_time"]}
     prompt = "Extract the booking facts from this PDF. Return only JSON matching the schema. Use ISO dates YYYY-MM-DD and 24-hour times HH:MM. Do not guess: use an empty string for any field that is not clearly present. hotel must be the exact property name; city and country must be the actual stay location."
     payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":"application/pdf","data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
-    try:
-        req = urllib.request.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent", data=json.dumps(payload).encode(), headers={"Content-Type":"application/json","x-goog-api-key":GEMINI_API_KEY}, method="POST")
-        with urllib.request.urlopen(req, timeout=90) as response:
-            body = json.loads(response.read())
-        text = body["candidates"][0]["content"]["parts"][0]["text"]
-        result = json.loads(text)
-        return result if isinstance(result, dict) else None
-    except urllib.error.HTTPError as exc:
-        print("Gemini extraction HTTP error:", exc.code, flush=True)
-        return None
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        print("Gemini extraction error:", type(exc).__name__, flush=True)
-        return None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent", data=json.dumps(payload).encode(), headers={"Content-Type":"application/json","x-goog-api-key":GEMINI_API_KEY}, method="POST")
+            with urllib.request.urlopen(req, timeout=90) as response:
+                body = json.loads(response.read())
+            text = body["candidates"][0]["content"]["parts"][0]["text"]
+            result = json.loads(text)
+            return result if isinstance(result, dict) else None
+        except urllib.error.HTTPError as exc:
+            if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
+                time.sleep(2 ** attempt); continue
+            print("Gemini extraction HTTP error:", exc.code, flush=True)
+            return None
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            print("Gemini extraction error:", type(exc).__name__, flush=True)
+            return None
 
 
 def extract_hotel_name(text):
