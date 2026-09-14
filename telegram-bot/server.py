@@ -106,6 +106,7 @@ def create_trip_from_document(filename, path, source="Telegram"):
     text = extract_pdf_text(path)
     ai = gemini_extract(path) or {}
     known = [("Budapest", "הונגריה"), ("בודפשט", "הונגריה"), ("מינכן", "גרמניה"), ("München", "גרמניה"), ("Munich", "גרמניה"), ("פרנקפורט", "גרמניה"), ("Frankfurt", "גרמניה"), ("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
+    city_labels = {"Budapest":"בודפשט", "בודפשט":"בודפשט", "Munich":"מינכן", "München":"מינכן", "מינכן":"מינכן", "Frankfurt":"פרנקפורט", "פרנקפורט":"פרנקפורט"}
     ai_city, ai_country = str(ai.get("city") or "").strip(), str(ai.get("country") or "").strip()
     if ai_city:
         known_city = next((pair for pair in known if pair[0].lower() == ai_city.lower()), (ai_city, ai_country))
@@ -134,12 +135,13 @@ def create_trip_from_document(filename, path, source="Telegram"):
     if all(re.fullmatch(r"20\d{2}-\d{2}-\d{2}", value) for value in ai_dates): dates = [(value[:4], value[5:7], value[8:10]) for value in ai_dates]
     start = "-".join(dates[0]) if dates else ""
     end = "-".join(dates[-1]) if len(dates) > 1 else start
-    title = (" · ".join(dict.fromkeys(x[1] for x in cities)) + (" · " + " · ".join(dict.fromkeys(x[0] for x in cities)) if cities else "")) or Path(filename).stem or "טיול חדש"
-    title = title.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט")
+    display_cities = list(dict.fromkeys((city_labels.get(x[0]) or x[0]) for x in cities))
+    title = (" · ".join(dict.fromkeys(x[1] for x in cities)) + (" · " + " · ".join(display_cities) if display_cities else "")) or Path(filename).stem or "טיול חדש"
+    title = title.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט").replace("Budapest", "בודפשט")
     image_by_city = {"מינכן": "https://images.unsplash.com/photo-1595867818082-083862f3d630?auto=format&fit=crop&w=1200&q=80", "פרנקפורט": "https://images.unsplash.com/photo-1520699049698-acd2fccb8cc8?auto=format&fit=crop&w=1200&q=80"}
     images = list(dict.fromkeys(image_by_city.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80") for city, _ in cities)) or ["https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"]
     image = images[0]
-    destinations = [{"city": city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), "country": country, "image": image_by_city.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), image)} for city, country in cities]
+    destinations = [{"city": city_labels.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט").replace("Budapest", "בודפשט")) or city, "country": country, "image": image_by_city.get(city_labels.get(city) or city, image)} for city, country in cities]
     hotel = str(ai.get("hotel") or "").strip() or extract_hotel_name(text)
     checkin_time = str(ai.get("check_in_time") or "14:00").strip()
     checkout_time = str(ai.get("check_out_time") or "11:00").strip()
@@ -224,6 +226,14 @@ def ensure_hotel_events():
     changed = len(events) != before
     trips_changed = False
     for trip in trips:
+        label_map = {"Budapest":"בודפשט", "Munich":"מינכן", "München":"מינכן", "Frankfurt":"פרנקפורט"}
+        for destination in trip.get("destinations", []):
+            if destination.get("city") in label_map: destination["city"] = label_map[destination["city"]]; trips_changed = True
+        if trip.get("destinations"):
+            countries = list(dict.fromkeys(d.get("country", "") for d in trip["destinations"] if d.get("country")))
+            cities = list(dict.fromkeys(d.get("city", "") for d in trip["destinations"] if d.get("city")))
+            normalized_title = " · ".join(countries + cities)
+            if normalized_title and trip.get("title") != normalized_title: trip["title"] = normalized_title; trips_changed = True
         hotel = trip.get("hotel") or ""
         if not hotel and trip.get("document"):
             candidates = list(UPLOADS.glob("*" + Path(trip["document"]).name)) + list(UPLOADS.glob("*" + Path(trip["document"]).stem + "*"))
