@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr && rm -rf /var/lib/apt/lists/*
 COPY index.html /app/index.html
 COPY tripy-icon.png /app/tripy-icon.png
 COPY manifest.webmanifest /app/manifest.webmanifest

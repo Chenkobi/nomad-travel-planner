@@ -38,10 +38,20 @@ def save_trips(trips):
     tmp.replace(TRIPS)
 
 def extract_pdf_text(path):
+    text = ""
     try:
         result = subprocess.run(["pdftotext", str(path), "-"], capture_output=True, text=True, timeout=20)
-        if result.returncode == 0: return result.stdout
+        if result.returncode == 0: text = result.stdout
     except (OSError, subprocess.SubprocessError): pass
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            prefix = str(Path(d) / "page")
+            subprocess.run(["pdftoppm", "-f", "1", "-l", "3", "-r", "200", "-png", str(path), prefix], capture_output=True, timeout=45, check=True)
+            for image in sorted(Path(d).glob("page-*.png")):
+                result = subprocess.run(["tesseract", str(image), "stdout", "-l", "eng"], capture_output=True, text=True, timeout=30)
+                if result.returncode == 0: text += "\n" + result.stdout
+    except (OSError, subprocess.SubprocessError): pass
+    if text.strip(): return text
     try: return path.read_bytes().decode("utf-8", errors="ignore")
     except OSError: return ""
 
@@ -55,6 +65,9 @@ def create_trip_from_document(filename, path, source="Telegram"):
     if not dates:
         dates = re.findall(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})\b", text)
         dates = [(y, m, d) for d, m, y in dates]
+    if not dates:
+        dates = re.findall(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})\b", text)
+        dates = [("20" + y, m, d.zfill(2)) for d, m, y in dates]
     months = {"JAN":"01","FEB":"02","MAR":"03","APR":"04","MAY":"05","JUN":"06","JUL":"07","AUG":"08","SEP":"09","OCT":"10","NOV":"11","DEC":"12"}
     text_dates = re.findall(r"\b(\d{1,2})\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(20\d{2})\b", text, re.I)
     if text_dates: dates += [(y, months[m.upper()], d.zfill(2)) for d, m, y in text_dates]
