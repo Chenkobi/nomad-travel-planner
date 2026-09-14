@@ -89,8 +89,8 @@ def create_trip_from_document(filename, path, source="Telegram"):
         try: return datetime.fromisoformat(value).date()
         except (TypeError, ValueError): return None
     new_start, new_end = as_date(start), as_date(end)
-    match = None
-    if new_start and new_end:
+    match = next((existing for existing in trips if existing.get("document") == filename or filename in existing.get("documents", [])), None)
+    if not match and new_start and new_end:
         for existing in trips:
             old_start, old_end = as_date(existing.get("start")), as_date(existing.get("end"))
             if not old_start or not old_end: continue
@@ -98,8 +98,9 @@ def create_trip_from_document(filename, path, source="Telegram"):
             if gap <= 14:
                 match = existing; break
     if match:
-        merged_start = min(as_date(match.get("start")), new_start)
-        merged_end = max(as_date(match.get("end")), new_end)
+        old_start, old_end = as_date(match.get("start")), as_date(match.get("end"))
+        merged_start = min(x for x in (old_start, new_start) if x)
+        merged_end = max(x for x in (old_end, new_end) if x)
         destinations = match.get("destinations", []) + destinations
         unique = {(d.get("city"), d.get("country")): d for d in destinations}
         match["destinations"] = list(unique.values())
