@@ -313,13 +313,19 @@ def ensure_hotel_events():
     trips_changed = False
     for trip in trips:
         label_map = {"Budapest":"בודפשט", "Munich":"מינכן", "München":"מינכן", "Frankfurt":"פרנקפורט"}
+        country_map = {"Germany":"גרמניה", "Hungary":"הונגריה", "Switzerland":"שוויץ", "Austria":"אוסטריה", "France":"צרפת", "Italy":"איטליה"}
         for destination in trip.get("destinations", []):
             if destination.get("city") in label_map: destination["city"] = label_map[destination["city"]]; trips_changed = True
-        if trip.get("destinations"):
-            countries = list(dict.fromkeys(d.get("country", "") for d in trip["destinations"] if d.get("country")))
-            cities = list(dict.fromkeys(d.get("city", "") for d in trip["destinations"] if d.get("city")))
-            normalized_title = " · ".join(countries)
-            if normalized_title and trip.get("title") != normalized_title: trip["title"] = normalized_title; trips_changed = True
+            if destination.get("country") in country_map: destination["country"] = country_map[destination["country"]]; trips_changed = True
+        if trip.get("hotels"):
+            for booking in trip["hotels"]:
+                if booking.get("country") in country_map: booking["country"] = country_map[booking["country"]]; trips_changed = True
+        ordered_hotels = sorted(trip.get("hotels", []), key=lambda h: str(h.get("start") or "9999-99-99"))
+        countries = list(dict.fromkeys((h.get("country") or "") for h in ordered_hotels if h.get("country")))
+        if not countries:
+            countries = list(dict.fromkeys(d.get("country", "") for d in trip.get("destinations", []) if d.get("country")))
+        normalized_title = " · ".join(countries)
+        if normalized_title and trip.get("title") != normalized_title: trip["title"] = normalized_title; trips_changed = True
         hotel = trip.get("hotel") or ""
         if not hotel and trip.get("document"):
             candidates = list(UPLOADS.glob("*" + Path(trip["document"]).name)) + list(UPLOADS.glob("*" + Path(trip["document"]).stem + "*"))
@@ -488,7 +494,17 @@ class Handler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}"); index = int(payload.get("index")); event = payload.get("event")
                 events = load_events()
                 if index < 0 or index >= len(events) or not isinstance(event, list): self._json(400, {"error": "invalid_event"}); return
-                events[index] = event[:6]; save_events(events); self._json(200, {"event": events[index]})
+                events[index] = event[:7]
+                if len(events[index]) > 6 and events[index][4] == "מלון":
+                    title = str(events[index][2]).replace("צ׳ק-אין · ", "").replace("צ׳ק-אאוט · ", "").strip()
+                    date = str(events[index][6])
+                    trips_for_update = load_trips()
+                    for trip in trips_for_update:
+                        for booking in trip.get("hotels", []):
+                            if booking.get("name") == title and booking.get("start" if "צ׳ק-אין" in str(events[index][2]) else "end") == date:
+                                booking["checkin_time" if "צ׳ק-אין" in str(events[index][2]) else "checkout_time"] = events[index][0]
+                    save_trips(trips_for_update)
+                save_events(events); self._json(200, {"event": events[index]})
             except (ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error": "invalid_json"})
             return
         if self.path != "/api/trips": self._json(404, {"error": "not_found"}); return
