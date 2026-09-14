@@ -404,6 +404,15 @@ def ensure_hotel_events():
                 key = ("צ׳ק-אאוט · " + booking_hotel, booking_end)
                 if key not in seen:
                     events.insert(0, [booking.get("checkout_time", "11:00"), ICONS["מלון"], key[0], f"{booking_end} · שעה: {booking.get('checkout_time', '11:00')}", "מלון", "PDF", booking_end]); seen.add(key); changed = True
+        for rental in trip.get("rentals", []):
+            if rental.get("pickup_date") and rental.get("pickup_time") and rental.get("pickup_location"):
+                key = ("איסוף רכב · " + str(rental.get("vehicle_type") or "רכב"), str(rental["pickup_date"]))
+                if key not in seen:
+                    events.insert(0, [rental["pickup_time"], "🚗", key[0], f"{rental['pickup_location']} · שעה {rental['pickup_time']}", "רכב", "Telegram", rental["pickup_date"], rental["pickup_location"]]); seen.add(key); changed = True
+            if rental.get("dropoff_date") and rental.get("dropoff_time") and rental.get("dropoff_location"):
+                key = ("החזרת רכב · " + str(rental.get("vehicle_type") or "רכב"), str(rental["dropoff_date"]))
+                if key not in seen:
+                    events.insert(0, [rental["dropoff_time"], "🚗", key[0], f"{rental['dropoff_location']} · שעה {rental['dropoff_time']}", "רכב", "Telegram", rental["dropoff_date"], rental["dropoff_location"]]); seen.add(key); changed = True
     if trips_changed: save_trips(trips)
     if changed: save_events(events)
     return events
