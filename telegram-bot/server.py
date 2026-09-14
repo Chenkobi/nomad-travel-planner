@@ -239,7 +239,7 @@ class Handler(BaseHTTPRequestHandler):
         raw = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status); self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
-    def do_OPTIONS(self): self.send_response(204); self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"); self.send_header("Access-Control-Allow-Headers", "Content-Type"); self.end_headers()
+    def do_OPTIONS(self): self.send_response(204); self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS"); self.send_header("Access-Control-Allow-Headers", "Content-Type"); self.end_headers()
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
@@ -273,6 +273,20 @@ class Handler(BaseHTTPRequestHandler):
             trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": str(payload.get("title") or "טיול חדש")[:120], "start": str(payload.get("start") or ""), "end": str(payload.get("end") or ""), "days": int(payload.get("days") or 0), "source": "Web"}
             trips = load_trips(); trips.insert(0, trip); save_trips(trips); self._json(201, {"trip": trip})
         except (ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error": "invalid_json"})
+    def do_PATCH(self):
+        prefix = "/api/trips/"
+        if not self.path.startswith(prefix): self._json(404, {"error": "not_found"}); return
+        try:
+            length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}")
+            trip_id = urllib.parse.unquote(self.path[len(prefix):]); trips = load_trips()
+            for trip in trips:
+                if str(trip.get("id")) == trip_id:
+                    for key in ("hotel", "title", "start", "end", "days"):
+                        if key in payload: trip[key] = payload[key]
+                    save_trips(trips); self._json(200, {"trip": trip}); return
+            self._json(404, {"error": "trip_not_found"})
+        except (ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error": "invalid_json"})
+
     def do_DELETE(self):
         prefix = "/api/trips/"
         if not self.path.startswith(prefix): self._json(404, {"error": "not_found"}); return
