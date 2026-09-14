@@ -336,13 +336,32 @@ def ensure_hotel_events():
             if collection not in trip: trip[collection] = []; trips_changed = True
         docs = list(dict.fromkeys(trip.get("documents") or ([trip.get("document")] if trip.get("document") else [])))
         titles = trip.get("document_titles", {})
+        for record in trip.get("hotels", []):
+            doc = record.get("document")
+            if doc: docs.append(doc); titles[doc] = f"אישור מלון · {record.get('name', 'המלון')}"
+        for record in trip.get("flights", []):
+            doc = record.get("document")
+            if doc: docs.append(doc); titles[doc] = f"כרטיס טיסה · {record.get('airline', '')} {record.get('number', '')}".strip()
+        for record in trip.get("trains", []):
+            doc = record.get("document")
+            if doc: docs.append(doc); titles[doc] = f"כרטיס רכבת · {record.get('number', '')}".strip()
+        for record in trip.get("rentals", []):
+            doc = record.get("document")
+            if doc: docs.append(doc); titles[doc] = f"השכרת רכב · {record.get('vehicle_type', 'רכב')}"
+        for record in trip.get("attractions", []):
+            doc = record.get("document")
+            if doc: docs.append(doc); titles[doc] = f"אטרקציה · {record.get('name', 'אטרקציה')}"
+        docs = list(dict.fromkeys(docs))
         unique_docs = []
         seen_titles = set()
         for doc in reversed(docs):
             if not doc: continue
-            desired_title = f"אישור מלון · {hotel}" if hotel != "המלון" else "אישור מלון"
-            if desired_title in seen_titles: continue
-            seen_titles.add(desired_title); unique_docs.append(doc); titles[doc] = desired_title
+            source_title = str(titles.get(doc, "")).strip()
+            typed_prefixes = ("כרטיס טיסה", "כרטיס רכבת", "אטרקציה", "השכרת רכב", "ביטוח נסיעות")
+            desired_title = source_title if (source_title.startswith(typed_prefixes) or source_title.startswith("אישור מלון · ")) else (f"אישור מלון · {hotel}" if hotel != "המלון" else "אישור מלון")
+            dedupe_key = desired_title if desired_title.startswith(typed_prefixes) else ("hotel", desired_title)
+            if dedupe_key in seen_titles: continue
+            seen_titles.add(dedupe_key); unique_docs.append(doc); titles[doc] = desired_title
         docs = list(reversed(unique_docs))
         if trip.get("documents") != docs: trip["documents"] = docs; trips_changed = True
         if trip.get("document_titles") != titles: trip["document_titles"] = titles; trips_changed = True
