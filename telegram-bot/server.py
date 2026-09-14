@@ -136,7 +136,7 @@ def create_trip_from_document(filename, path, source="Telegram"):
     start = "-".join(dates[0]) if dates else ""
     end = "-".join(dates[-1]) if len(dates) > 1 else start
     display_cities = list(dict.fromkeys((city_labels.get(x[0]) or x[0]) for x in cities))
-    title = (" · ".join(dict.fromkeys(x[1] for x in cities)) + (" · " + " · ".join(display_cities) if display_cities else "")) or Path(filename).stem or "טיול חדש"
+    title = (" · ".join(dict.fromkeys(x[1] for x in cities))) or Path(filename).stem or "טיול חדש"
     title = title.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט").replace("Budapest", "בודפשט")
     image_by_city = {"מינכן": "https://images.unsplash.com/photo-1595867818082-083862f3d630?auto=format&fit=crop&w=1200&q=80", "פרנקפורט": "https://images.unsplash.com/photo-1520699049698-acd2fccb8cc8?auto=format&fit=crop&w=1200&q=80"}
     images = list(dict.fromkeys(image_by_city.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80") for city, _ in cities)) or ["https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"]
@@ -145,7 +145,8 @@ def create_trip_from_document(filename, path, source="Telegram"):
     hotel = str(ai.get("hotel") or "").strip() or extract_hotel_name(text)
     checkin_time = str(ai.get("check_in_time") or "14:00").strip()
     checkout_time = str(ai.get("check_out_time") or "11:00").strip()
-    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": images, "destinations": destinations, "hotel": hotel, "checkin_time": checkin_time, "checkout_time": checkout_time, "document_titles": {filename: ("Adina hotel voucher" if "Adina Apartment Hotel" in hotel else ("אישור מלון" if hotel else "אישור הזמנה")) + (f" · {start}–{end}" if start and end else "")}}
+    document_title = (f"אישור מלון · {hotel}" if hotel else "אישור הזמנה")
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "image": image, "images": images, "destinations": destinations, "hotel": hotel, "checkin_time": checkin_time, "checkout_time": checkout_time, "document_titles": {filename: document_title}}
     if start and end:
         trip["days"] = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
     if not validate_booking_trip(trip):
@@ -171,14 +172,22 @@ def create_trip_from_document(filename, path, source="Telegram"):
         unique = {(d.get("city"), d.get("country")): d for d in destinations}
         match["destinations"] = list(unique.values())
         countries = list(dict.fromkeys(d["country"] for d in match["destinations"]))
-        cities_text = list(dict.fromkeys(d["city"] for d in match["destinations"]))
-        match["title"] = " · ".join(countries + cities_text)
+        match["title"] = " · ".join(countries)
         match["start"], match["end"] = merged_start.isoformat(), merged_end.isoformat()
         match["days"] = (merged_end - merged_start).days + 1
         match["images"] = list(dict.fromkeys(match.get("images", [match.get("image")] if match.get("image") else []) + [image]))
         match["image"] = match["images"][0]
-        match["documents"] = list(dict.fromkeys(match.get("documents", [match.get("document")] if match.get("document") else []) + [filename]))
-        match["document_titles"] = {**match.get("document_titles", {}), **trip["document_titles"]}
+        same_booking = old_start == new_start and old_end == new_end
+        if same_booking:
+            old_docs = set(match.get("documents", []))
+            match["documents"] = [filename]
+            match["document_titles"] = trip["document_titles"]
+            current_events = load_events()
+            current_events = [e for e in current_events if not (len(e) > 6 and e[4] == "מלון" and e[6] in (start, end))]
+            save_events(current_events)
+        else:
+            match["documents"] = list(dict.fromkeys(match.get("documents", [match.get("document")] if match.get("document") else []) + [filename]))
+            match["document_titles"] = {**match.get("document_titles", {}), **trip["document_titles"]}
         if hotel: match["hotel"] = hotel
         save_trips(trips)
         return match
@@ -217,9 +226,15 @@ def ensure_hotel_events():
     demo_markers = ("LX 162", "Ruby Mimi", "רכבת לציריך", "אישור חדש")
     events = [e for e in events if len(e) < 5 or (e[2] not in demo_markers and e[4] != "מסמך")]
     seen = set()
+    seen_hotel_dates = set()
     cleaned = []
     for event in events:
-        key = (str(event[2]), str(event[6] if len(event) > 6 else ""))
+        event_date = str(event[6] if len(event) > 6 else "")
+        if len(event) > 6 and event[4] == "מלון" and event_date:
+            hotel_key = ("out" if "אאוט" in str(event[2]) else "in", event_date)
+            if hotel_key in seen_hotel_dates: continue
+            seen_hotel_dates.add(hotel_key)
+        key = (str(event[2]), event_date)
         if key not in seen:
             seen.add(key); cleaned.append(event)
     events = cleaned
@@ -245,9 +260,11 @@ def ensure_hotel_events():
         docs = list(dict.fromkeys(trip.get("documents") or ([trip.get("document")] if trip.get("document") else [])))
         titles = trip.get("document_titles", {})
         for doc in docs:
-            if doc and doc not in titles:
-                titles[doc] = "Adina hotel voucher" if "Adina" in hotel else "אישור מלון"
-                trips_changed = True
+            if doc:
+                desired_title = f"אישור מלון · {hotel}" if hotel != "המלון" else "אישור מלון"
+                if titles.get(doc) != desired_title:
+                    titles[doc] = desired_title
+                    trips_changed = True
         if trip.get("documents") != docs: trip["documents"] = docs; trips_changed = True
         if trip.get("document_titles") != titles: trip["document_titles"] = titles; trips_changed = True
         for event in events:
