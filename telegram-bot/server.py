@@ -55,6 +55,9 @@ def create_trip_from_document(filename, path, source="Telegram"):
     if not dates:
         dates = re.findall(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})\b", text)
         dates = [(y, m, d) for d, m, y in dates]
+    months = {"JAN":"01","FEB":"02","MAR":"03","APR":"04","MAY":"05","JUN":"06","JUL":"07","AUG":"08","SEP":"09","OCT":"10","NOV":"11","DEC":"12"}
+    text_dates = re.findall(r"\b(\d{1,2})\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+(20\d{2})\b", text, re.I)
+    if text_dates: dates += [(y, months[m.upper()], d.zfill(2)) for d, m, y in text_dates]
     start = "-".join(dates[0]) if dates else ""
     end = "-".join(dates[-1]) if len(dates) > 1 else start
     title = " · ".join(dict.fromkeys(x[0] for x in cities)) or Path(filename).stem or "טיול חדש"
