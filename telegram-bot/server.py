@@ -300,7 +300,7 @@ def ensure_hotel_events():
     before = len(events)
     demo_markers = ("LX 162", "Ruby Mimi", "רכבת לציריך", "אישור חדש")
     events = [e for e in events if len(e) < 5 or (e[2] not in demo_markers and e[4] != "מסמך" and not (e[4] == "מלון" and not str(e[6] if len(e) > 6 else "").strip()))]
-    events = [e for e in events if len(e) < 5 or (e[2] not in demo_markers and e[4] != "מסמך" and e[4] != "מלון")]
+    events = [e for e in events if len(e) < 5 or (e[2] not in demo_markers and e[4] != "מסמך" and e[4] != "מלון" and not str(e[2]).strip().startswith(("http://", "https://")))]
     seen = set()
     cleaned = []
     for event in events:
