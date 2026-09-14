@@ -47,7 +47,7 @@ def extract_pdf_text(path):
 
 def create_trip_from_document(filename, path, source="Telegram"):
     text = extract_pdf_text(path)
-    known = [("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
+    known = [("מינכן", "גרמניה"), ("München", "גרמניה"), ("Munich", "גרמניה"), ("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
     cities = []
     for city, country in known:
         if city.lower() in text.lower() and country not in [x[1] for x in cities]: cities.append((city, country))
@@ -60,8 +60,9 @@ def create_trip_from_document(filename, path, source="Telegram"):
     if text_dates: dates += [(y, months[m.upper()], d.zfill(2)) for d, m, y in text_dates]
     start = "-".join(dates[0]) if dates else ""
     end = "-".join(dates[-1]) if len(dates) > 1 else start
-    title = " · ".join(dict.fromkeys(x[0] for x in cities)) or Path(filename).stem or "טיול חדש"
-    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": len(dates) if dates else 0, "source": source, "document": filename}
+    title = (" · ".join(dict.fromkeys(x[1] for x in cities)) + (" · " + " · ".join(dict.fromkeys(x[0] for x in cities)) if cities else "")) or Path(filename).stem or "טיול חדש"
+    image = "https://images.unsplash.com/photo-1595867818082-083862f3d630?auto=format&fit=crop&w=1200&q=80" if any(x[1] == "גרמניה" for x in cities) else "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": len(dates) if dates else 0, "source": source, "document": filename, "image": image}
     trips = load_trips(); trips.insert(0, trip); save_trips(trips)
     return trip
 
@@ -146,14 +147,14 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, status, payload):
         raw = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status); self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+        self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
     def do_OPTIONS(self): self.send_response(204); self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"); self.send_header("Access-Control-Allow-Headers", "Content-Type"); self.end_headers()
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/api/events": self._json(200, {"events": load_events()}); return
         if path == "/api/trips": self._json(200, {"trips": load_trips()}); return
         if path in ("/", "/index.html"):
-            raw = (ROOT / "index.html").read_bytes(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
+            raw = (ROOT / "index.html").read_bytes(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         self._json(404, {"error": "not_found"})
     def do_POST(self):
         if self.path != "/api/trips": self._json(404, {"error": "not_found"}); return
