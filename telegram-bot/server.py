@@ -59,7 +59,7 @@ def extract_pdf_text(path):
 
 def gemini_extract(path):
     if not GEMINI_API_KEY: return None
-    schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"}},"required":["type","hotel","city","country","check_in","check_out","check_in_time","check_out_time","airline","flight_number","departure_date","departure_time","arrival_date","arrival_time","origin","destination"]}
+    schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"}},"required":["type","hotel","city","country","check_in","check_out","check_in_time","check_out_time","airline","flight_number","departure_date","departure_time","arrival_date","arrival_time","origin","destination"]}
     prompt = "Classify this travel PDF and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, or other. For flights extract airline, flight_number, departure/arrival ISO dates and 24-hour times, origin and destination airports or cities. For hotels extract exact property name, stay city/country, check-in/out ISO dates and times. Use empty strings for fields not clearly present; never infer or copy hotel fields into a flight."
     payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":"application/pdf","data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
     for attempt in range(3):
@@ -127,6 +127,21 @@ def create_trip_from_document(filename, path, source="Telegram"):
                 events.insert(0, event); save_events(events)
             return target
         raise ValueError("flight has no existing dated trip to attach to")
+    if doc_type in ("train", "attraction"):
+        if doc_type == "train":
+            date = str(ai.get("departure_date") or "").strip(); time_value = str(ai.get("departure_time") or "").strip(); name = str(ai.get("train_number") or "").strip(); origin = str(ai.get("origin") or "").strip(); destination = str(ai.get("destination") or "").strip()
+            if not all((date, time_value, name, origin, destination)): raise ValueError("train document missing unambiguous facts")
+            title = f"רכבת {name}"; details = f"{origin} → {destination}"; record = {"number":name,"origin":origin,"destination":destination,"date":date,"time":time_value,"document":filename}; kind = "רכבת"; icon = "🚆"
+        else:
+            date = str(ai.get("date") or "").strip(); time_value = str(ai.get("time") or "").strip(); name = str(ai.get("attraction") or "").strip(); location = str(ai.get("location") or "").strip()
+            if not all((date, time_value, name, location)): raise ValueError("attraction document missing unambiguous facts")
+            title = name; details = location; record = {"name":name,"location":location,"date":date,"time":time_value,"document":filename}; kind = "אטרקציה"; icon = "🎟️"
+        trips = load_trips(); target = next((t for t in trips if t.get("start") <= date <= t.get("end")), None)
+        if not target: raise ValueError(f"{doc_type} has no existing dated trip to attach to")
+        key = "trains" if doc_type == "train" else "attractions"; target.setdefault(key, []).append(record); target[key] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target[key]}.values()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = ((f"כרטיס רכבת · {name}") if doc_type == "train" else f"אטרקציה · {name}"); save_trips(trips)
+        events = load_events(); event = [time_value, icon, title, details, kind, source, date]
+        if not any(len(e) > 6 and e[2] == title and e[6] == date for e in events): events.insert(0, event); save_events(events)
+        return target
     known = [("Budapest", "הונגריה"), ("בודפשט", "הונגריה"), ("מינכן", "גרמניה"), ("München", "גרמניה"), ("Munich", "גרמניה"), ("פרנקפורט", "גרמניה"), ("Frankfurt", "גרמניה"), ("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
     city_labels = {"Budapest":"בודפשט", "בודפשט":"בודפשט", "Munich":"מינכן", "München":"מינכן", "מינכן":"מינכן", "Frankfurt":"פרנקפורט", "פרנקפורט":"פרנקפורט"}
     ai_city, ai_country = str(ai.get("city") or "").strip(), str(ai.get("country") or "").strip()
