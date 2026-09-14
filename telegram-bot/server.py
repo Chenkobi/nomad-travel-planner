@@ -177,9 +177,9 @@ def handle_message(message):
             summary = next(iter(trip.get("document_titles", {}).values()), "אישור הזמנה")
             add_event("מסמך · " + summary, "התקבל דרך Telegram ונשמר בטיול", "מסמך")
             if trip.get("start"):
-                add_event("צ׳ק-אין · " + (trip.get("hotel") or title), "תחילת השהייה", "מלון", event_time=trip["start"])
+                add_event("צ׳ק-אין · " + (trip.get("hotel") or title), f"{trip['start']} · ברירת מחדל למלון: 14:00", "מלון", event_time="14:00")
             if trip.get("end") and trip.get("end") != trip.get("start"):
-                add_event("צ׳ק-אאוט · " + (trip.get("hotel") or title), "סיום השהייה", "מלון", event_time=trip["end"])
+                add_event("צ׳ק-אאוט · " + (trip.get("hotel") or title), f"{trip['end']} · ברירת מחדל למלון: 11:00", "מלון", event_time="11:00")
             send(chat, f"קיבלתי את {name} ✅\\nעודכן הטיול: {title}")
         except Exception as exc:
             print("Document processing error:", exc, flush=True)
@@ -232,6 +232,14 @@ class Handler(BaseHTTPRequestHandler):
                 raw = file_path.read_bytes(); self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         self._json(404, {"error": "not_found"})
     def do_POST(self):
+        if self.path == "/api/events":
+            try:
+                length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}"); index = int(payload.get("index")); event = payload.get("event")
+                events = load_events()
+                if index < 0 or index >= len(events) or not isinstance(event, list): self._json(400, {"error": "invalid_event"}); return
+                events[index] = event[:6]; save_events(events); self._json(200, {"event": events[index]})
+            except (ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error": "invalid_json"})
+            return
         if self.path != "/api/trips": self._json(404, {"error": "not_found"}); return
         try:
             length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}")
