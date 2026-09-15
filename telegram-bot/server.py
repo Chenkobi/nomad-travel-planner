@@ -543,6 +543,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self): self.send_response(204); self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS"); self.send_header("Access-Control-Allow-Headers", "Content-Type"); self.end_headers()
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path == "/api/rates":
+            try:
+                request = urllib.request.Request("https://api.frankfurter.dev/v2/rates?base=ILS&quotes=USD,GBP,EUR,CHF,CAD,AUD,JPY,HUF,INR", headers={"Accept":"application/json", "User-Agent":"TRIPY/1.0"})
+                with urllib.request.urlopen(request, timeout=15) as response: raw_rates = json.loads(response.read())
+                if not isinstance(raw_rates, list) or not raw_rates: raise ValueError("empty_rates")
+                normalized = {str(row["quote"]): 1 / float(row["rate"]) for row in raw_rates if row.get("quote") and float(row.get("rate", 0)) > 0}
+                self._json(200, {"base":"ILS", "date":str(raw_rates[0].get("date") or ""), "rates":normalized, "source":"Frankfurter"}); return
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                self._json(502, {"error":"rates_unavailable"}); return
         if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
         if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": load_trips()}); return
         if path.startswith("/api/documents/"):
