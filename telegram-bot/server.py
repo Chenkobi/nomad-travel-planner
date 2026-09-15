@@ -584,7 +584,13 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}"); title = str(payload.get("title") or "").strip(); date = str(payload.get("date") or "").strip(); time_value = str(payload.get("time") or "").strip(); kind = str(payload.get("kind") or "אחר").strip(); location = str(payload.get("location") or "").strip()
                 if not title or not date or not re.fullmatch(r"\d{2}:\d{2}", time_value): self._json(400, {"error":"title_date_time_required"}); return
-                event = [time_value, ICONS.get(kind, "📌"), title, location, kind, "Web", date, location]; events = load_events(); events.insert(0, event); save_events(events); self._json(201, {"event":event}); return
+                event = [time_value, ICONS.get(kind, "📌"), title, location, kind, "Web", date, location]
+                events = load_events()
+                key = (title, date, kind)
+                existing = next((e for e in events if len(e) > 6 and (str(e[2]), str(e[6]), str(e[4])) == key), None)
+                if existing:
+                    self._json(200, {"event": existing, "duplicate": True}); return
+                events.insert(0, event); save_events(events); self._json(201, {"event":event}); return
             except (ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error":"invalid_json"}); return
         if self.path == "/api/events":
             try:
