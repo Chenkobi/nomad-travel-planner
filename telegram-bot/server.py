@@ -85,6 +85,20 @@ def gemini_extract(path):
             return None
 
 
+def gemini_extract_attraction(path):
+    if not GEMINI_API_KEY: return None
+    schema = {"type":"object","properties":{"attraction":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"}},"required":["attraction","date","time","location"]}
+    prompt = "This is a travel attraction booking screenshot or document. Extract only facts clearly visible in the image. Return JSON with the attraction name, date in ISO YYYY-MM-DD, time in 24-hour HH:MM, and the complete visit or meeting location. This is not a hotel. For a Lindt Home of Chocolate booking, attraction is Lindt Home of Chocolate. Do not return empty fields and do not invent facts."
+    payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":{".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp"}.get(path.suffix.lower(), "application/pdf"),"data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
+    try:
+        req = urllib.request.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent", data=json.dumps(payload).encode(), headers={"Content-Type":"application/json","x-goog-api-key":GEMINI_API_KEY}, method="POST")
+        with urllib.request.urlopen(req, timeout=90) as response: body = json.loads(response.read())
+        result = json.loads(body["candidates"][0]["content"]["parts"][0]["text"])
+        return result if isinstance(result, dict) else None
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def extract_hotel_name(text):
     patterns = [
         r"Adina Apartment Hotel[^\n]+",
@@ -143,6 +157,10 @@ def create_trip_from_document(filename, path, source="Telegram"):
     text = extract_pdf_text(path)
     ai = gemini_extract(path) or {}
     doc_type = infer_document_type(ai, text)
+    if doc_type == "attraction" and not all(str(ai.get(k) or "").strip() for k in ("attraction", "date", "time", "location")):
+        focused = gemini_extract_attraction(path)
+        if focused: ai.update(focused); ai["type"] = "attraction"
+        doc_type = infer_document_type(ai, text)
     if doc_type == "other":
         raise ValueError("document type not recognized; send a clearer screenshot or PDF")
     if doc_type == "flight":
