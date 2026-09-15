@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Small dependency-free TRIPY Telegram bridge for the working travel version."""
-import base64, json, os, re, shutil, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, cgi, io, json, os, re, shutil, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -563,6 +563,29 @@ class Handler(BaseHTTPRequestHandler):
                 raw = file_path.read_bytes(); self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         self._json(404, {"error": "not_found"})
     def do_POST(self):
+        if self.path == "/api/upload":
+            try:
+                length = int(self.headers.get("Content-Length", "0")); body = self.rfile.read(length)
+                form = cgi.FieldStorage(fp=io.BytesIO(body), headers=self.headers, environ={"REQUEST_METHOD":"POST", "CONTENT_TYPE":self.headers.get("Content-Type", ""), "CONTENT_LENGTH":str(length)})
+                item = form["file"] if "file" in form else None
+                if not item or not getattr(item, "filename", ""):
+                    self._json(400, {"error":"file_required"}); return
+                filename = Path(item.filename).name
+                if Path(filename).suffix.lower() not in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}:
+                    self._json(400, {"error":"unsupported_file_type"}); return
+                UPLOADS.mkdir(parents=True, exist_ok=True)
+                stored = f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}_{filename}"
+                path = UPLOADS / stored; path.write_bytes(item.file.read())
+                trip = create_trip_from_document(filename, path, "Web")
+                self._json(201, {"trip":trip, "filename":filename}); return
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                print("Web upload error:", type(exc).__name__, flush=True); self._json(400, {"error":"document_processing_failed"}); return
+        if self.path == "/api/manual":
+            try:
+                length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}"); title = str(payload.get("title") or "").strip(); date = str(payload.get("date") or "").strip(); time_value = str(payload.get("time") or "").strip(); kind = str(payload.get("kind") or "אחר").strip(); location = str(payload.get("location") or "").strip()
+                if not title or not date or not re.fullmatch(r"\d{2}:\d{2}", time_value): self._json(400, {"error":"title_date_time_required"}); return
+                event = [time_value, ICONS.get(kind, "📌"), title, location, kind, "Web", date, location]; events = load_events(); events.insert(0, event); save_events(events); self._json(201, {"event":event}); return
+            except (ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error":"invalid_json"}); return
         if self.path == "/api/events":
             try:
                 length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}"); index = int(payload.get("index")); event = payload.get("event")
