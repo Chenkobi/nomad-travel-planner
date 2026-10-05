@@ -606,7 +606,7 @@ class Handler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}"); index = int(payload.get("index")); event = payload.get("event")
                 events = load_events()
                 if index < 0 or index >= len(events) or not isinstance(event, list): self._json(400, {"error": "invalid_event"}); return
-                events[index] = event[:7]
+                events[index] = event[:8]
                 if len(events[index]) > 6 and events[index][4] == "מלון":
                     title = str(events[index][2]).replace("צ׳ק-אין · ", "").replace("צ׳ק-אאוט · ", "").strip()
                     date = str(events[index][6])
