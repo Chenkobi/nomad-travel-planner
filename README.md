@@ -16,3 +16,15 @@
 ## הערת מוצר
 
 בשלב האבטיפוס שערי המטבע הם נתוני דוגמה. חיבור אמיתי לשער יומי ולבוט Telegram ידרוש backend קטן, אימות משתמשים, אחסון מאובטח ו-parser לאישורי הזמנה.
+
+## Email Intake
+
+השרת כולל endpoint ראשוני לקליטת מייל MIME גולמי:
+
+```text
+POST /api/intake/email
+X-TRIPY-INTAKE-SECRET: [server secret]
+Content-Type: message/rfc822
+```
+
+הוא שומר את המייל המקורי, גוף הטקסט, גוף ה-HTML והקבצים המצורפים תחת `TRIPY_EMAIL_DIR`, ומונע קליטה כפולה לפי `Message-ID` או SHA-256. בשלב הבא הקליטה תחובר ל-parser של הזמנות, ביטולים ושינויים.

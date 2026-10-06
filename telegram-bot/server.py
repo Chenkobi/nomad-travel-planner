@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Small dependency-free TRIPY Telegram bridge for the working travel version."""
-import base64, cgi, io, json, os, re, shutil, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, cgi, hashlib, hmac, io, json, os, re, shutil, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
+from email import policy
+from email.header import decode_header, make_header
+from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -14,6 +17,9 @@ ALLOWED_CHAT = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
 PORT = int(os.getenv("PORT", "8787"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
+EMAIL_INTAKE_SECRET = os.getenv("TRIPY_INTAKE_SECRET", "").strip()
+EMAIL_DIR = Path(os.getenv("TRIPY_EMAIL_DIR", ROOT / "trip-email"))
+EMAIL_INDEX = EMAIL_DIR / "index.json"
 OFFSET = 0
 LOCK = threading.Lock()
 
@@ -42,6 +48,75 @@ def save_trips(trips):
         handle.write(json.dumps(trips, ensure_ascii=False, indent=2))
         tmp = Path(handle.name)
     tmp.replace(TRIPS)
+
+
+def load_email_index():
+    if not EMAIL_INDEX.exists(): return []
+    try:
+        value = json.loads(EMAIL_INDEX.read_text(encoding="utf-8"))
+        return value if isinstance(value, list) else []
+    except (ValueError, OSError):
+        return []
+
+
+def save_email_index(items):
+    EMAIL_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=EMAIL_DIR, prefix=".index.", suffix=".tmp", encoding="utf-8", delete=False) as handle:
+        handle.write(json.dumps(items, ensure_ascii=False, indent=2))
+        tmp = Path(handle.name)
+    tmp.replace(EMAIL_INDEX)
+
+
+def decode_email_header(value):
+    if not value: return ""
+    try: return str(make_header(decode_header(str(value))))
+    except (ValueError, TypeError): return str(value)
+
+
+def safe_email_filename(value, fallback):
+    name = Path(str(value or fallback)).name
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    return name[:180] or fallback
+
+
+def store_incoming_email(raw):
+    if not raw: raise ValueError("empty_email")
+    digest = hashlib.sha256(raw).hexdigest()
+    message = BytesParser(policy=policy.default).parsebytes(raw)
+    message_id = str(message.get("Message-ID") or "").strip()
+    dedupe_key = "message-id:" + message_id if message_id else "sha256:" + digest
+    with LOCK:
+        existing = next((item for item in load_email_index() if item.get("dedupe_key") == dedupe_key), None)
+        if existing: return existing, True
+        intake_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f") + "-" + digest[:12]
+        folder = EMAIL_DIR / intake_id
+        folder.mkdir(parents=True, exist_ok=False)
+        (folder / "source.eml").write_bytes(raw)
+        text_body = []
+        html_body = []
+        attachments = []
+        for part in message.walk():
+            if part.is_multipart(): continue
+            content = part.get_payload(decode=True) or b""
+            disposition = part.get_content_disposition()
+            filename = part.get_filename()
+            if disposition == "attachment" or filename:
+                stored_name = safe_email_filename(decode_email_header(filename), "attachment.bin")
+                target = folder / (f"{len(attachments)+1}_" + stored_name)
+                target.write_bytes(content)
+                attachments.append({"filename": stored_name, "path": target.name, "content_type": part.get_content_type(), "size": len(content)})
+                continue
+            if part.get_content_type() == "text/plain":
+                try: text_body.append(part.get_content())
+                except (LookupError, TypeError): text_body.append(content.decode(part.get_content_charset() or "utf-8", errors="replace"))
+            elif part.get_content_type() == "text/html":
+                try: html_body.append(part.get_content())
+                except (LookupError, TypeError): html_body.append(content.decode(part.get_content_charset() or "utf-8", errors="replace"))
+        (folder / "body.txt").write_text("\n\n".join(text_body), encoding="utf-8")
+        (folder / "body.html").write_text("\n\n".join(html_body), encoding="utf-8")
+        record = {"id": intake_id, "status": "received", "source": "Email", "dedupe_key": dedupe_key, "sha256": digest, "message_id": message_id, "from": decode_email_header(message.get("From")), "to": decode_email_header(message.get("To")), "subject": decode_email_header(message.get("Subject")), "date": decode_email_header(message.get("Date")), "received_at": datetime.now(timezone.utc).isoformat(), "source_file": f"{intake_id}/source.eml", "body_file": f"{intake_id}/body.txt", "attachments": attachments}
+        items = load_email_index(); items.insert(0, record); save_email_index(items)
+        return record, False
 
 def extract_pdf_text(path):
     text = ""
@@ -576,6 +651,21 @@ class Handler(BaseHTTPRequestHandler):
                 raw = file_path.read_bytes(); self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         self._json(404, {"error": "not_found"})
     def do_POST(self):
+        if self.path == "/api/intake/email":
+            if not EMAIL_INTAKE_SECRET:
+                self._json(503, {"error": "email_intake_not_configured"}); return
+            supplied = self.headers.get("X-TRIPY-INTAKE-SECRET", "")
+            if not hmac.compare_digest(supplied, EMAIL_INTAKE_SECRET):
+                self._json(401, {"error": "unauthorized"}); return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 30 * 1024 * 1024:
+                    self._json(413, {"error": "email_size_invalid"}); return
+                raw = self.rfile.read(length)
+                record, duplicate = store_incoming_email(raw)
+                self._json(202 if not duplicate else 200, {"intake": record, "duplicate": duplicate}); return
+            except (OSError, ValueError, TypeError):
+                self._json(400, {"error": "invalid_email"}); return
         if self.path == "/api/upload":
             try:
                 length = int(self.headers.get("Content-Length", "0")); body = self.rfile.read(length)
