@@ -488,7 +488,7 @@ def handle_message(message):
             local = UPLOADS / (datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S_") + Path(name).name)
             download_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info['file_path']}"
             with urllib.request.urlopen(download_url, timeout=60) as response: local.write_bytes(response.read())
-            trip = create_trip_from_document(name, local)
+            trip = create_trip_from_document(local.name, local)
             title = trip["title"]
             if trip.get("_ingested_type", "hotel") == "hotel" and trip.get("start"):
                 add_event("צ׳ק-אין · " + (trip.get("hotel") or title), f"{trip['start']} · שעה: {trip.get('checkin_time', '14:00')}", "מלון", event_time=trip.get("checkin_time", "14:00"))
@@ -585,7 +585,7 @@ class Handler(BaseHTTPRequestHandler):
                 UPLOADS.mkdir(parents=True, exist_ok=True)
                 stored = f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}_{filename}"
                 path = UPLOADS / stored; path.write_bytes(item.file.read())
-                trip = create_trip_from_document(filename, path, "Web")
+                trip = create_trip_from_document(stored, path, "Web")
                 self._json(201, {"trip":trip, "filename":filename}); return
             except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 print("Web upload error:", type(exc).__name__, flush=True); self._json(400, {"error":"document_processing_failed"}); return
