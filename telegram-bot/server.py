@@ -25,8 +25,10 @@ def load_events():
     except (ValueError, OSError): return []
 
 def save_events(events):
-    tmp = DATA.with_suffix(".tmp")
-    tmp.write_text(json.dumps(events, ensure_ascii=False, indent=2), encoding="utf-8")
+    DATA.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=DATA.parent, prefix=f".{DATA.name}.", suffix=".tmp", encoding="utf-8", delete=False) as handle:
+        handle.write(json.dumps(events, ensure_ascii=False, indent=2))
+        tmp = Path(handle.name)
     tmp.replace(DATA)
 
 def load_trips():
@@ -35,8 +37,10 @@ def load_trips():
     except (ValueError, OSError): return []
 
 def save_trips(trips):
-    tmp = TRIPS.with_suffix(".tmp")
-    tmp.write_text(json.dumps(trips, ensure_ascii=False, indent=2), encoding="utf-8")
+    TRIPS.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=TRIPS.parent, prefix=f".{TRIPS.name}.", suffix=".tmp", encoding="utf-8", delete=False) as handle:
+        handle.write(json.dumps(trips, ensure_ascii=False, indent=2))
+        tmp = Path(handle.name)
     tmp.replace(TRIPS)
 
 def extract_pdf_text(path):
