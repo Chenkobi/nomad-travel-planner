@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from booking_lifecycle import cancel_booking, find_booking_matches
+from booking_types import infer_extended_type, normalize_insurance
 from email_rules import classify_email_intent, looks_like_travel_email
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -186,14 +187,14 @@ def lifecycle_facts(ai):
 
 def decorate_trip_booking(trip, ai, filename, intake_id):
     kind = str(ai.get("type") or "").strip().lower()
-    collection = {"hotel": "hotels", "flight": "flights", "train": "trains", "attraction": "attractions", "car_rental": "rentals"}.get(kind)
+    collection = {"hotel": "hotels", "flight": "flights", "train": "trains", "attraction": "attractions", "car_rental": "rentals", "restaurant": "restaurants"}.get(kind)
     if not collection:
         return False
     changed = False
     for booking in trip.get(collection, []) or []:
         if booking.get("document") != filename:
             continue
-        for key in ("supplier", "confirmation_number", "traveler"):
+        for key in ("supplier", "confirmation_number", "traveler", "phone", "address"):
             value = str(ai.get(key) or "").strip()
             if value:
                 booking[key] = value; changed = True
@@ -291,8 +292,8 @@ def extract_pdf_text(path):
 
 def gemini_extract(path):
     if not GEMINI_API_KEY: return None
-    schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type"]}
-    prompt = "Classify this travel document or screenshot and extract only clearly present facts. This may be an email screenshot or mobile screenshot, not a PDF. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, insurance, or other. Insurance must be document-only: do not invent itinerary facts. For flights extract airline, flight_number, departure/arrival ISO dates and 24-hour times, origin and destination airports or cities. For hotels extract exact property name, stay city/country, check-in/out ISO dates and times. For trains extract train_number, origin, destination, departure_date and departure_time. For attractions, including screenshots of museum, tour, factory, venue, or admission tickets, classify as attraction and extract attraction, date, time and location. For car rentals extract pickup_date, pickup_time, pickup_location, vehicle_type, and when clearly present dropoff_date, dropoff_time and dropoff_location. Use empty strings for fields not clearly present; never guess. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel."
+    schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","restaurant","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"restaurant_name":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"address":{"type":"string"},"phone":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},"policy_number":{"type":"string"},"insurer":{"type":"string"},"insured_travelers":{"type":"array","items":{"type":"string"}},"valid_from":{"type":"string"},"valid_to":{"type":"string"},"coverage_summary":{"type":"string"},"covered_items":{"type":"array","items":{"type":"string"}},"exclusions":{"type":"array","items":{"type":"string"}},"what_to_do":{"type":"array","items":{"type":"string"}},"emergency_contacts":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"phone":{"type":"string"},"hours":{"type":"string"}}}},"source_language":{"type":"string"},"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type"]}
+    prompt = "Classify this travel document, email or screenshot and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, restaurant, insurance, or other. Never guess; use empty strings or empty arrays when a fact is absent. A restaurant reservation must include restaurant_name, date and time, and address/phone when clearly present. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel. Insurance is one trip-level policy: preserve only source facts, translate concise coverage and emergency instructions into plain Hebrew when the source is not Hebrew, and keep the original document as the source of truth. Do not invent coverage, exclusions, phone numbers, or medical advice."
     mime_type = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain"}.get(path.suffix.lower(), "application/pdf")
     payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":mime_type,"data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
     for attempt in range(3):
@@ -373,6 +374,8 @@ def extract_attraction_facts(text, ai):
 def infer_document_type(ai, text=""):
     doc_type = str(ai.get("type") or "").strip().lower()
     normalized = str(text or "").lower()
+    extended = infer_extended_type(ai, text)
+    if extended: return extended
     attraction_markers = ("museum", "chocolate museum", "lindt home of chocolate", "single ticket", "admission", "ticket", "guided tour", "visit", "directions", "kilchberg", "attraction")
     attraction_score = sum(1 for marker in attraction_markers if marker in normalized)
     if doc_type in ("", "other", "hotel") and attraction_score >= 2: return "attraction"
@@ -414,12 +417,27 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         raise ValueError("flight has no existing dated trip to attach to")
     if doc_type == "insurance":
         trips = load_trips()
-        policy_start = str(ai.get("check_in") or ai.get("departure_date") or "").strip(); policy_end = str(ai.get("check_out") or ai.get("arrival_date") or "").strip()
+        policy_start = str(ai.get("valid_from") or ai.get("check_in") or ai.get("departure_date") or "").strip(); policy_end = str(ai.get("valid_to") or ai.get("check_out") or ai.get("arrival_date") or "").strip()
         candidates = [t for t in trips if policy_start and t.get("start") <= policy_start <= t.get("end")]
         target = candidates[0] if len(candidates) == 1 else (trips[0] if len(trips) == 1 else None)
         if not target: raise ValueError("insurance cannot be assigned to one dated trip")
+        insurance = normalize_insurance(ai)
+        insurance["document"] = filename
+        insurance["source_language"] = insurance.get("source_language") or str(ai.get("source_language") or "").strip()
+        target["insurance"] = insurance
         target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = "ביטוח נסיעות לחו״ל"; save_trips(trips)
         return {**target, "_ingested_type": "insurance"}
+    if doc_type == "restaurant":
+        date = str(ai.get("date") or "").strip(); time_value = str(ai.get("time") or "").strip(); name = str(ai.get("restaurant_name") or ai.get("name") or "").strip()
+        location = str(ai.get("address") or ai.get("location") or "").strip(); phone = str(ai.get("phone") or "").strip()
+        if not all((date, time_value, name)): raise ValueError("restaurant reservation missing name, date, or time")
+        trips = load_trips(); target = next((t for t in trips if t.get("start") <= date <= t.get("end")), None)
+        if not target: raise ValueError("restaurant reservation has no existing dated trip to attach to")
+        record = {"name": name, "date": date, "time": time_value, "address": location, "location": location, "phone": phone, "supplier": str(ai.get("supplier") or "").strip(), "confirmation_number": str(ai.get("confirmation_number") or "").strip(), "document": filename, "status": "confirmed"}
+        target.setdefault("restaurants", []).append(record); target["restaurants"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["restaurants"]}.values()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"הזמנת מסעדה · {name}"; save_trips(trips)
+        events = load_events(); event = [time_value, "🍽️", name, location or "הזמנת מסעדה", "מסעדה", source, date, location]
+        if not any(len(e) > 6 and e[2] == name and e[6] == date for e in events): events.insert(0, event); save_events(events)
+        return {**target, "_ingested_type": "restaurant"}
     if doc_type == "car_rental":
         pickup_date = str(ai.get("pickup_date") or "").strip(); pickup_time = str(ai.get("pickup_time") or "").strip(); pickup_location = str(ai.get("pickup_location") or "").strip(); vehicle_type = str(ai.get("vehicle_type") or "").strip()
         if not all((pickup_date, pickup_time, pickup_location, vehicle_type)): raise ValueError("car rental missing pickup location, time, date, or vehicle type")
@@ -445,7 +463,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         trips = load_trips(); target = next((t for t in trips if t.get("start") <= date <= t.get("end")), None)
         if not target: raise ValueError(f"{doc_type} has no existing dated trip to attach to")
         key = "trains" if doc_type == "train" else "attractions"; target.setdefault(key, []).append(record); target[key] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target[key]}.values()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = ((f"כרטיס רכבת · {name}") if doc_type == "train" else f"אטרקציה · {name}"); save_trips(trips)
-        events = load_events(); event = [time_value, icon, title, details, kind, source, date]
+        events = load_events(); event = [time_value, icon, title, details, kind, source, date, record.get("location", "")]
         if not any(len(e) > 6 and e[2] == title and e[6] == date for e in events): events.insert(0, event); save_events(events)
         return {**target, "_ingested_type": doc_type}
     known = [("Budapest", "הונגריה"), ("בודפשט", "הונגריה"), ("מינכן", "גרמניה"), ("München", "גרמניה"), ("Munich", "גרמניה"), ("פרנקפורט", "גרמניה"), ("Frankfurt", "גרמניה"), ("ציריך", "שווייץ"), ("Zurich", "שווייץ"), ("רומא", "איטליה"), ("Rome", "איטליה"), ("פריז", "צרפת"), ("Paris", "צרפת"), ("לונדון", "בריטניה"), ("London", "בריטניה")]
@@ -632,7 +650,7 @@ def ensure_hotel_events():
             country = (trip.get("destinations") or [{}])[0].get("country", "")
             trip["hotels"] = [{"name": hotel, "city": city, "country": country, "start": trip["start"], "end": trip["end"], "checkin_time": trip.get("checkin_time", "14:00"), "checkout_time": trip.get("checkout_time", "11:00"), "document": trip.get("document")}]
             trips_changed = True
-        for collection in ("flights", "trains", "attractions", "rentals"):
+        for collection in ("flights", "trains", "attractions", "rentals", "restaurants"):
             if collection not in trip: trip[collection] = []; trips_changed = True
         docs = list(dict.fromkeys(trip.get("documents") or ([trip.get("document")] if trip.get("document") else [])))
         titles = trip.get("document_titles", {})
@@ -651,13 +669,19 @@ def ensure_hotel_events():
         for record in trip.get("attractions", []):
             doc = record.get("document")
             if doc: docs.append(doc); titles[doc] = f"אטרקציה · {record.get('name', 'אטרקציה')}"
+        for record in trip.get("restaurants", []):
+            doc = record.get("document")
+            if doc: docs.append(doc); titles[doc] = f"הזמנת מסעדה · {record.get('name', 'מסעדה')}"
+        insurance = trip.get("insurance") or {}
+        if insurance.get("document"):
+            docs.append(insurance["document"]); titles[insurance["document"]] = "ביטוח נסיעות לחו״ל"
         docs = list(dict.fromkeys(docs))
         unique_docs = []
         seen_titles = set()
         for doc in reversed(docs):
             if not doc: continue
             source_title = str(titles.get(doc, "")).strip()
-            typed_prefixes = ("כרטיס טיסה", "כרטיס רכבת", "אטרקציה", "השכרת רכב", "ביטוח נסיעות")
+            typed_prefixes = ("כרטיס טיסה", "כרטיס רכבת", "אטרקציה", "השכרת רכב", "הזמנת מסעדה", "ביטוח נסיעות")
             desired_title = source_title if (source_title.startswith(typed_prefixes) or source_title.startswith("אישור מלון · ")) else (f"אישור מלון · {hotel}" if hotel != "המלון" else "אישור מלון")
             dedupe_key = desired_title if desired_title.startswith(typed_prefixes) else ("hotel", desired_title)
             if dedupe_key in seen_titles: continue
@@ -687,6 +711,12 @@ def ensure_hotel_events():
                 key = ("החזרת רכב · " + str(rental.get("vehicle_type") or "רכב"), str(rental["dropoff_date"]))
                 if key not in seen:
                     events.insert(0, [rental["dropoff_time"], "🚗", key[0], f"{rental['dropoff_location']} · שעה {rental['dropoff_time']}", "רכב", "Telegram", rental["dropoff_date"], rental["dropoff_location"]]); seen.add(key); changed = True
+        for restaurant in trip.get("restaurants", []):
+            if restaurant.get("date") and restaurant.get("time"):
+                location = restaurant.get("address") or restaurant.get("location") or ""
+                key = ("מסעדה · " + str(restaurant.get("name") or "מסעדה"), str(restaurant["date"]))
+                if key not in seen:
+                    events.insert(0, [restaurant["time"], "🍽️", key[0], location or "הזמנת מסעדה", "מסעדה", "Email", restaurant["date"], location]); seen.add(key); changed = True
     if trips_changed: save_trips(trips)
     if changed: save_events(events)
     return events

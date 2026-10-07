@@ -7,6 +7,7 @@ COPY manifest.webmanifest /app/manifest.webmanifest
 COPY telegram-bot/server.py /app/telegram-bot/server.py
 COPY telegram-bot/email_rules.py /app/telegram-bot/email_rules.py
 COPY telegram-bot/booking_lifecycle.py /app/telegram-bot/booking_lifecycle.py
+COPY telegram-bot/booking_types.py /app/telegram-bot/booking_types.py
 RUN mkdir -p /app/trip-uploads
 ENV PORT=8787
 EXPOSE 8787
