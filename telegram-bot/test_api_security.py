@@ -58,6 +58,14 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertEqual(json.loads(response.read()), {"trips": []})
 
+    def test_frontend_session_cookie_authorizes_same_origin_api(self):
+        page = self.request("/")
+        self.assertEqual(page.status, 200)
+        cookie = page.headers.get("Set-Cookie") or ""
+        self.assertIn("tripy_session=", cookie)
+        response = self.request("/api/trips", {"Cookie": cookie.split(";", 1)[0]})
+        self.assertEqual(response.status, 200)
+
     def test_local_development_fallback_allows_api_without_token(self):
         server.API_AUTH_TOKEN = ""
         response = self.request("/api/trips")

@@ -31,6 +31,6 @@ Content-Type: message/rfc822
 
 ## API security
 
-בפרודקשן חובה להגדיר את משתנה הסביבה `TRIPY_API_AUTH_TOKEN` בצד השרת. כל קריאות ה-API הרגישות והמשנות מצב דורשות `Authorization: Bearer ...`; השרת מחזיר CORS רק למקור המוגדר ב-`TRIPY_API_ALLOWED_ORIGIN` (ברירת המחדל היא מקור ה-frontend של TRIPY), ולא משתמש ב-wildcard.
+בפרודקשן חובה להגדיר את משתנה הסביבה `TRIPY_API_AUTH_TOKEN` בצד השרת. כל קריאות ה-API הרגישות והמשנות מצב דורשות `Authorization: Bearer ...`, כותרת `X-TRIPY-API-TOKEN`, או session cookie שנוצר בעת פתיחת ה-frontend. השרת מחזיר CORS רק למקור המוגדר ב-`TRIPY_API_ALLOWED_ORIGIN` (ברירת המחדל היא מקור ה-frontend של TRIPY), ולא משתמש ב-wildcard.
 
 להרצה מקומית מפורשת אפשר להשאיר את `TRIPY_API_AUTH_TOKEN` לא מוגדר: השרת מאפשר את ה-API ללא אימות ומשתמש ב-CORS פתוח כדי לשמר את זרימת הפיתוח המקומית. ה-frontend שולח את כותרת האימות רק כאשר `window.TRIPY_API_AUTH_TOKEN` מוגדר בזמן ההרצה; אין להוסיף ערך סודי לקוד המקור.

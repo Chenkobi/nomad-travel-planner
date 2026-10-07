@@ -7,6 +7,7 @@ from email.header import decode_header, make_header
 from email.parser import BytesParser
 from email.message import Message
 from html.parser import HTMLParser
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import mimetypes
@@ -141,7 +142,15 @@ def api_request_authorized(headers):
     authorization = str(headers.get("Authorization", ""))
     supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
     supplied = supplied or str(headers.get("X-TRIPY-API-TOKEN", ""))
-    return hmac.compare_digest(supplied, API_AUTH_TOKEN)
+    if supplied and hmac.compare_digest(supplied, API_AUTH_TOKEN):
+        return True
+    cookie = SimpleCookie()
+    try:
+        cookie.load(str(headers.get("Cookie", "")))
+    except (ValueError, TypeError):
+        return False
+    session = cookie.get("tripy_session")
+    return bool(session and hmac.compare_digest(session.value, API_AUTH_TOKEN))
 
 
 def cors_origin(origin):
@@ -1326,7 +1335,10 @@ class Handler(BaseHTTPRequestHandler):
                 raw = read_bounded_file(file_path); self.send_response(200); self.send_header("Content-Type", document_content_type(file_path)); self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Content-Disposition", "inline; filename*=UTF-8''" + urllib.parse.quote(filename)); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
             self._json(404, {"error": "document_not_found"}); return
         if path in ("/", "/index.html"):
-            raw = (ROOT / "index.html").read_bytes(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
+            raw = (ROOT / "index.html").read_bytes(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store")
+            if API_AUTH_TOKEN:
+                self.send_header("Set-Cookie", "tripy_session=" + API_AUTH_TOKEN + "; Path=/; HttpOnly; SameSite=Lax; Secure")
+            self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         static = {"/tripy-icon.png": (ROOT / "tripy-icon.png", "image/png"), "/manifest.webmanifest": (ROOT / "manifest.webmanifest", "application/manifest+json")}
         if path in static:
             file_path, content_type = static[path]
