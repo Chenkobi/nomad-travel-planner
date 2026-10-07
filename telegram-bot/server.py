@@ -8,6 +8,7 @@ from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from booking_lifecycle import cancel_booking, find_booking_matches
 from email_rules import classify_email_intent, looks_like_travel_email
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -175,6 +176,46 @@ def email_notification(intent, record, trip=None, review=False):
     return f"TRIPY: {action}\n{subject}"
 
 
+def lifecycle_facts(ai):
+    facts = dict(ai or {})
+    facts["start"] = facts.get("start") or facts.get("check_in") or facts.get("departure_date") or facts.get("date") or facts.get("pickup_date")
+    facts["end"] = facts.get("end") or facts.get("check_out") or facts.get("arrival_date") or facts.get("date") or facts.get("dropoff_date") or facts.get("start")
+    facts["name"] = facts.get("name") or facts.get("hotel") or facts.get("attraction") or facts.get("vehicle_type") or facts.get("flight_number") or facts.get("train_number")
+    return facts
+
+
+def decorate_trip_booking(trip, ai, filename, intake_id):
+    kind = str(ai.get("type") or "").strip().lower()
+    collection = {"hotel": "hotels", "flight": "flights", "train": "trains", "attraction": "attractions", "car_rental": "rentals"}.get(kind)
+    if not collection:
+        return False
+    changed = False
+    for booking in trip.get(collection, []) or []:
+        if booking.get("document") != filename:
+            continue
+        for key in ("supplier", "confirmation_number", "traveler"):
+            value = str(ai.get(key) or "").strip()
+            if value:
+                booking[key] = value; changed = True
+        booking["status"] = "confirmed"
+        booking["source_email_id"] = intake_id
+        booking.setdefault("lifecycle_history", []).append({"status": "confirmed", "email_id": intake_id, "at": datetime.now(timezone.utc).isoformat()})
+        changed = True
+        break
+    return changed
+
+
+def apply_email_cancellation(ai, record):
+    trips = load_trips()
+    matches = find_booking_matches(trips, lifecycle_facts(ai))
+    if len(matches) != 1:
+        return False, "no_unique_match"
+    match = matches[0]
+    cancel_booking(trips, match, record.get("id"))
+    save_trips(trips)
+    return True, match.get("kind")
+
+
 def process_incoming_email(record):
     """Process one persisted MIME record without losing it on parser failure."""
     intake_id = record.get("id")
@@ -186,11 +227,6 @@ def process_incoming_email(record):
     if not looks_like_travel_email(subject, body):
         update_email_record(intake_id, status="ignored", intent="unknown", processed_at=datetime.now(timezone.utc).isoformat())
         return
-    if intent in ("cancelled", "modified"):
-        update_email_record(intake_id, status="needs_review", intent=intent, review_reason="lifecycle_matching_not_enabled", processed_at=datetime.now(timezone.utc).isoformat())
-        if TOKEN and ALLOWED_CHAT:
-            send(ALLOWED_CHAT, email_notification(intent, record, review=True))
-        return
     prepared = prepare_email_source(record)
     if not prepared:
         update_email_record(intake_id, status="needs_review", intent=intent, review_reason="no_supported_attachment_or_text", processed_at=datetime.now(timezone.utc).isoformat())
@@ -198,8 +234,25 @@ def process_incoming_email(record):
             send(ALLOWED_CHAT, email_notification(intent, record, review=True))
         return
     filename, path = prepared
+    ai = gemini_extract(path) or {}
+    if intent == "cancelled":
+        applied, reason = apply_email_cancellation(ai, record)
+        update_email_record(intake_id, status="processed" if applied else "needs_review", intent=intent, lifecycle_action="cancelled" if applied else "review", review_reason="" if applied else reason, processed_at=datetime.now(timezone.utc).isoformat())
+        if TOKEN and ALLOWED_CHAT:
+            send(ALLOWED_CHAT, email_notification(intent, record, review=not applied))
+        return
+    if intent == "modified":
+        update_email_record(intake_id, status="needs_review", intent=intent, review_reason="replacement_requires_review", processed_at=datetime.now(timezone.utc).isoformat())
+        if TOKEN and ALLOWED_CHAT:
+            send(ALLOWED_CHAT, email_notification(intent, record, review=True))
+        return
     try:
-        trip = create_trip_from_document(filename, path, "Email")
+        trip = create_trip_from_document(filename, path, "Email", ai_override=ai)
+        persisted_trips = load_trips()
+        persisted_trip = next((item for item in persisted_trips if str(item.get("id")) == str(trip.get("id"))), trip)
+        decorate_trip_booking(persisted_trip, ai, filename, intake_id)
+        save_trips(persisted_trips)
+        trip = persisted_trip
         update_email_record(intake_id, status="processed", intent=intent, processed_at=datetime.now(timezone.utc).isoformat(), ingested_type=trip.get("_ingested_type", "hotel"), trip_id=trip.get("id"), document=filename)
         if TOKEN and ALLOWED_CHAT:
             send(ALLOWED_CHAT, email_notification(intent, record, trip=trip))
@@ -238,7 +291,7 @@ def extract_pdf_text(path):
 
 def gemini_extract(path):
     if not GEMINI_API_KEY: return None
-    schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"}},"required":["type"]}
+    schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type"]}
     prompt = "Classify this travel document or screenshot and extract only clearly present facts. This may be an email screenshot or mobile screenshot, not a PDF. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, insurance, or other. Insurance must be document-only: do not invent itinerary facts. For flights extract airline, flight_number, departure/arrival ISO dates and 24-hour times, origin and destination airports or cities. For hotels extract exact property name, stay city/country, check-in/out ISO dates and times. For trains extract train_number, origin, destination, departure_date and departure_time. For attractions, including screenshots of museum, tour, factory, venue, or admission tickets, classify as attraction and extract attraction, date, time and location. For car rentals extract pickup_date, pickup_time, pickup_location, vehicle_type, and when clearly present dropoff_date, dropoff_time and dropoff_location. Use empty strings for fields not clearly present; never guess. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel."
     mime_type = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain"}.get(path.suffix.lower(), "application/pdf")
     payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":mime_type,"data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
@@ -328,9 +381,9 @@ def infer_document_type(ai, text=""):
     return doc_type or "other"
 
 
-def create_trip_from_document(filename, path, source="Telegram"):
+def create_trip_from_document(filename, path, source="Telegram", ai_override=None):
     text = extract_pdf_text(path)
-    ai = gemini_extract(path) or {}
+    ai = ai_override if ai_override is not None else (gemini_extract(path) or {})
     doc_type = infer_document_type(ai, text)
     if doc_type == "attraction" and not all(str(ai.get(k) or "").strip() for k in ("attraction", "date", "time", "location")):
         focused = gemini_extract_attraction(path)
@@ -613,6 +666,7 @@ def ensure_hotel_events():
         if trip.get("documents") != docs: trip["documents"] = docs; trips_changed = True
         if trip.get("document_titles") != titles: trip["document_titles"] = titles; trips_changed = True
         for booking in trip.get("hotels", []):
+            if booking.get("status") in {"cancelled", "superseded"}: continue
             booking_hotel = booking.get("name") or hotel
             booking_start = booking.get("start")
             booking_end = booking.get("end")
