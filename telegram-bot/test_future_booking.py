@@ -57,6 +57,23 @@ class FutureBookingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             server.create_dated_trip_shell([], '2026-12-10', '2026-12-09', 'Email', 'bad.txt')
 
+    def test_hotel_documents_within_fourteen_days_are_not_broadly_merged(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                server.DATA = root / 'events.json'; server.TRIPS = root / 'trips.json'; server.UPLOADS = root / 'uploads'
+                server.save_trips([]); server.save_events([])
+                first = root / 'one.txt'; first.write_text('Hotel One 2026-10-10 2026-10-12 Zurich')
+                second = root / 'two.txt'; second.write_text('Hotel Two 2026-10-20 2026-10-22 Munich')
+                first_ai = {'type': 'hotel', 'hotel': 'Hotel One', 'city': 'Zurich', 'country': 'Switzerland', 'check_in': '2026-10-10', 'check_out': '2026-10-12'}
+                second_ai = {'type': 'hotel', 'hotel': 'Hotel Two', 'city': 'Munich', 'country': 'Germany', 'check_in': '2026-10-20', 'check_out': '2026-10-22'}
+                server.create_trip_from_document('one.txt', first, 'Email', ai_override=first_ai)
+                server.create_trip_from_document('two.txt', second, 'Email', ai_override=second_ai)
+                self.assertEqual(len(json.loads(server.TRIPS.read_text())), 2)
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
+
 
 if __name__ == '__main__':
     unittest.main()

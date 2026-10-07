@@ -1,16 +1,25 @@
 #!/usr/bin/env python3
 """Small dependency-free TRIPY Telegram bridge for the working travel version."""
-import base64, cgi, hashlib, hmac, io, json, os, re, shutil, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, hashlib, hmac, io, json, os, re, shutil, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from email import policy
 from email.header import decode_header, make_header
 from email.parser import BytesParser
+from email.message import Message
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import mimetypes
 
-from booking_lifecycle import cancel_booking, find_booking_matches
+from booking_lifecycle import (
+    BookingDateError,
+    cancel_booking,
+    enrich_booking_lifecycle,
+    find_booking_matches,
+    validate_date_range,
+)
 from booking_types import infer_extended_type, normalize_insurance
+from event_contract import event_as_legacy_list, event_identity
 from email_rules import classify_email_intent, looks_like_travel_email
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,10 +34,40 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 EMAIL_INTAKE_SECRET = os.getenv("TRIPY_INTAKE_SECRET", "").strip()
 EMAIL_DIR = Path(os.getenv("TRIPY_EMAIL_DIR", ROOT / "trip-email"))
 EMAIL_INDEX = EMAIL_DIR / "index.json"
+TELEGRAM_INTAKE = Path(os.getenv("TRIPY_TELEGRAM_INTAKE_FILE", ROOT / "telegram-intake.json"))
+EMAIL_PROCESSING_LEASE_SECONDS = int(os.getenv("TRIPY_EMAIL_PROCESSING_LEASE_SECONDS", "900"))
+MAX_PROCESSING_STAGE = 64
+MAX_PROCESSING_ERROR = 256
+MAX_STAGE_HISTORY = 12
 OFFSET = 0
 LOCK = threading.Lock()
 
 ICONS = {"טיסה": "✈️", "רכבת": "🚆", "מלון": "🏨", "אטרקציה": "🎟️", "מסעדה": "🍽️"}
+
+
+def document_content_type(path):
+    """Return a safe response MIME type for a stored document."""
+    suffix = Path(path).suffix.lower()
+    known = {
+        ".txt": "text/plain; charset=utf-8",
+        ".html": "text/html; charset=utf-8",
+        ".htm": "text/html; charset=utf-8",
+        ".pdf": "application/pdf",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }
+    return known.get(suffix, "application/octet-stream")
+
+
+def waze_destination(name, address):
+    """Return an address only when it is present and not name-only."""
+    destination = str(address or "").replace("&amp;", "&").strip()
+    label = str(name or "").strip().casefold()
+    if not destination or (label and destination.casefold() == label):
+        return ""
+    return destination
 
 def load_events():
     if not DATA.exists(): return []
@@ -70,6 +109,54 @@ def save_email_index(items):
         handle.write(json.dumps(items, ensure_ascii=False, indent=2))
         tmp = Path(handle.name)
     tmp.replace(EMAIL_INDEX)
+
+
+def load_telegram_intake():
+    if not TELEGRAM_INTAKE.exists(): return []
+    try:
+        value = json.loads(TELEGRAM_INTAKE.read_text(encoding="utf-8"))
+        return value if isinstance(value, list) else []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def save_telegram_intake(items):
+    TELEGRAM_INTAKE.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=TELEGRAM_INTAKE.parent, prefix=f".{TELEGRAM_INTAKE.name}.", suffix=".tmp", encoding="utf-8", delete=False) as handle:
+        handle.write(json.dumps(items, ensure_ascii=False, indent=2))
+        tmp = Path(handle.name)
+    tmp.replace(TELEGRAM_INTAKE)
+
+
+def update_telegram_intake(intake_id, **changes):
+    with LOCK:
+        items = load_telegram_intake()
+        for record in items:
+            if record.get("id") == intake_id:
+                record.update(changes)
+                record["updated_at"] = datetime.now(timezone.utc).isoformat()
+                save_telegram_intake(items)
+                return record
+    return None
+
+
+def telegram_media_descriptor(message):
+    item = message.get("document")
+    if item:
+        return item, str(item.get("file_name") or "telegram-document"), str(item.get("mime_type") or "application/octet-stream")
+    photos = message.get("photo") or []
+    if photos:
+        return photos[-1], "telegram-photo.jpg", "image/jpeg"
+    return None, "", ""
+
+
+def filename_for_mime(filename, mime_type, remote_path=""):
+    filename = Path(str(filename or "")).name
+    if not Path(filename).suffix:
+        remote_suffix = Path(str(remote_path or "")).suffix
+        suffix = remote_suffix or {"application/pdf": ".pdf", "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "text/html": ".html", "text/plain": ".txt"}.get(mime_type, ".bin")
+        filename += suffix
+    return filename or "telegram-document.bin"
 
 
 def decode_email_header(value):
@@ -124,7 +211,73 @@ def store_incoming_email(raw):
         return record, False
 
 
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
+def _parse_timestamp(value):
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _redacted_error(error):
+    text = re.sub(r"(?i)(token|password|secret|api[_-]?key|authorization)\s*[:=]\s*[^\s,;]+", r"\1=[REDACTED]", str(error or ""))
+    text = re.sub(r"(?i)bearer\s+[^\s]+", "Bearer [REDACTED]", text)
+    return text[:MAX_PROCESSING_ERROR]
+
+
+def claim_email_for_processing(intake_id, now=None, lease_seconds=None):
+    """Atomically acquire a processing lease, recovering only stale workers."""
+    now = now or _utc_now()
+    lease_seconds = EMAIL_PROCESSING_LEASE_SECONDS if lease_seconds is None else lease_seconds
+    with LOCK:
+        items = load_email_index()
+        for record in items:
+            if record.get("id") != intake_id:
+                continue
+            status = record.get("status")
+            started = _parse_timestamp(record.get("processing_started_at"))
+            stale = status == "processing" and started and (now - started).total_seconds() >= lease_seconds
+            if status not in {"received", "processing"} or (status == "processing" and not stale):
+                return None
+            record.update({
+                "status": "processing",
+                "processing_started_at": now.isoformat(),
+                "processing_attempts": int(record.get("processing_attempts") or 0) + 1,
+            })
+            save_email_index(items)
+            return dict(record)
+    return None
+
+
+def update_email_stage(intake_id, stage, error=None):
+    stage = str(stage or "unknown")[:MAX_PROCESSING_STAGE]
+    with LOCK:
+        items = load_email_index()
+        for record in items:
+            if record.get("id") != intake_id:
+                continue
+            now = _utc_now().isoformat()
+            history = list(record.get("processing_stage_history") or [])
+            history.append({"stage": stage, "at": now})
+            record["processing_stage_history"] = history[-MAX_STAGE_HISTORY:]
+            record["processing_stage"] = stage
+            record["processing_stage_updated_at"] = now
+            if error is not None:
+                record["processing_error"] = _redacted_error(error)
+            save_email_index(items)
+            return dict(record)
+    return None
+
+
 def update_email_record(intake_id, **changes):
+    if "review_reason" in changes:
+        changes["review_reason"] = _redacted_error(changes["review_reason"])
+    if "processing_error" in changes:
+        changes["processing_error"] = _redacted_error(changes["processing_error"])
     with LOCK:
         items = load_email_index()
         for record in items:
@@ -236,7 +389,7 @@ def email_notification(intent, record, trip=None, review=False):
 
 def intent_from_ai(ai, subject="", body=""):
     status = str((ai or {}).get("status") or "").strip().lower()
-    status_map = {"confirmed": "confirmed", "modified": "modified", "cancelled": "cancelled", "refunded": "cancelled"}
+    status_map = {"confirmed": "confirmed", "modified": "modified", "cancelled": "cancelled", "refunded": "refunded"}
     if status in status_map:
         return status_map[status]
     return "unknown"
@@ -248,6 +401,28 @@ def lifecycle_facts(ai):
     facts["end"] = facts.get("end") or facts.get("check_out") or facts.get("arrival_date") or facts.get("date") or facts.get("dropoff_date") or facts.get("start")
     facts["name"] = facts.get("name") or facts.get("hotel") or facts.get("attraction") or facts.get("vehicle_type") or facts.get("flight_number") or facts.get("train_number")
     return facts
+
+
+def preserve_booking_metadata(trip, source, status="confirmed", source_email_id=None):
+    for collection in ("hotels", "flights", "trains", "attractions", "rentals", "restaurants"):
+        for booking in trip.get(collection, []) or []:
+            if "lifecycle_history" not in booking:
+                enrich_booking_lifecycle(booking, source, status=status, source_email_id=source_email_id)
+            else:
+                booking.setdefault("source", source)
+                booking.setdefault("status", status)
+                booking.setdefault("lifecycle_status", booking["status"])
+                if source_email_id:
+                    booking["source_email_id"] = source_email_id
+    insurance = trip.get("insurance")
+    if isinstance(insurance, dict):
+        if "lifecycle_history" not in insurance:
+            enrich_booking_lifecycle(insurance, source, status=status, source_email_id=source_email_id)
+        else:
+            insurance.setdefault("source", source)
+            insurance.setdefault("status", status)
+            insurance.setdefault("lifecycle_status", insurance["status"])
+    return trip
 
 
 def decorate_trip_booking(trip, ai, filename, intake_id):
@@ -279,84 +454,111 @@ def dated_trip_target(trips, date_value):
 
 
 def create_dated_trip_shell(trips, start, end, source, filename, title="טיול חדש"):
-    start, end = str(start or "").strip(), str(end or start or "").strip()
-    if not start or not end:
-        raise ValueError("booking has no usable dates")
-    try:
-        days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
-    except ValueError as exc:
-        raise ValueError("booking dates are not ISO dates") from exc
-    if end < start:
-        raise ValueError("booking end date precedes start date")
+    start, end = validate_date_range(start, end)
+    days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
     trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title or "טיול חדש", "start": start, "end": end, "days": days, "source": source, "document": filename, "documents": [filename], "image": "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80", "images": ["https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"], "destinations": [], "hotels": [], "flights": [], "trains": [], "attractions": [], "rentals": [], "restaurants": [], "document_titles": {filename: "אישור הזמנה"}}
     trips.append(trip)
     return trip
 
 
-def apply_email_cancellation(ai, record):
+def apply_email_cancellation(ai, record, status="cancelled"):
     trips = load_trips()
+    intake_id = record.get("id")
+    for trip in trips:
+        for collection in ("hotels", "flights", "trains", "attractions", "rentals", "restaurants"):
+            for booking in trip.get(collection, []) or []:
+                if booking.get("cancelled_by_email") == intake_id:
+                    return True, "already_cancelled"
     matches = find_booking_matches(trips, lifecycle_facts(ai))
     if len(matches) != 1:
         return False, "no_unique_match"
     match = matches[0]
-    cancel_booking(trips, match, record.get("id"))
+    cancel_booking(trips, match, intake_id, status=status)
     save_trips(trips)
     return True, match.get("kind")
 
 
+def find_email_trip(filename):
+    for trip in load_trips():
+        if trip.get("document") == filename or filename in (trip.get("documents") or []):
+            return trip
+        for collection in ("hotels", "flights", "trains", "attractions", "rentals", "restaurants"):
+            if any(item.get("document") == filename for item in trip.get(collection, []) or []):
+                return trip
+        if (trip.get("insurance") or {}).get("document") == filename:
+            return trip
+    return None
+
+
 def process_incoming_email(record):
-    """Process one persisted MIME record without losing it on parser failure."""
+    """Process one persisted MIME record under a crash-recoverable lease."""
     intake_id = record.get("id")
-    update_email_record(intake_id, status="processing", processing_started_at=datetime.now(timezone.utc).isoformat())
-    subject = str(record.get("subject") or "")
-    body = email_body_text(record)
-    prepared = prepare_email_source(record)
-    if not prepared:
-        if not looks_like_travel_email(subject, body):
-            update_email_record(intake_id, status="ignored", intent="unknown", processed_at=datetime.now(timezone.utc).isoformat())
-            return
-        update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="no_supported_attachment_or_text", processed_at=datetime.now(timezone.utc).isoformat())
-        if TOKEN and ALLOWED_CHAT:
-            send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
-        return
-    filename, path = prepared
-    ai = gemini_extract(path) or {}
-    if not ai:
-        update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="ai_extraction_failed", processed_at=datetime.now(timezone.utc).isoformat())
-        if TOKEN and ALLOWED_CHAT:
-            send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
-        return
-    intent = intent_from_ai(ai, subject, body)
-    if intent == "unknown":
-        update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="ai_status_missing", processed_at=datetime.now(timezone.utc).isoformat())
-        if TOKEN and ALLOWED_CHAT:
-            send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
-        return
-    if intent == "cancelled":
-        applied, reason = apply_email_cancellation(ai, record)
-        update_email_record(intake_id, status="processed" if applied else "needs_review", intent=intent, lifecycle_action="cancelled" if applied else "review", review_reason="" if applied else reason, processed_at=datetime.now(timezone.utc).isoformat())
-        if TOKEN and ALLOWED_CHAT:
-            send(ALLOWED_CHAT, email_notification(intent, record, review=not applied))
-        return
-    if intent == "modified":
-        update_email_record(intake_id, status="needs_review", intent=intent, review_reason="replacement_requires_review", processed_at=datetime.now(timezone.utc).isoformat())
-        if TOKEN and ALLOWED_CHAT:
-            send(ALLOWED_CHAT, email_notification(intent, record, review=True))
-        return
+    claimed = claim_email_for_processing(intake_id)
+    if not claimed:
+        return None
+    record = claimed
     try:
-        trip = create_trip_from_document(filename, path, "Email", ai_override=ai)
-        persisted_trips = load_trips()
-        persisted_trip = next((item for item in persisted_trips if str(item.get("id")) == str(trip.get("id"))), trip)
-        decorate_trip_booking(persisted_trip, ai, filename, intake_id)
-        save_trips(persisted_trips)
-        trip = persisted_trip
-        update_email_record(intake_id, status="processed", intent=intent, processed_at=datetime.now(timezone.utc).isoformat(), ingested_type=trip.get("_ingested_type", "hotel"), trip_id=trip.get("id"), document=filename)
-        if TOKEN and ALLOWED_CHAT:
-            send(ALLOWED_CHAT, email_notification(intent, record, trip=trip))
+        update_email_stage(intake_id, "reading")
+        subject = str(record.get("subject") or "")
+        body = email_body_text(record)
+        update_email_stage(intake_id, "preparing_source")
+        prepared = prepare_email_source(record)
+        if not prepared:
+            if not looks_like_travel_email(subject, body):
+                update_email_record(intake_id, status="ignored", intent="unknown", processed_at=_utc_now().isoformat())
+                return record
+            update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="no_supported_attachment_or_text", processed_at=_utc_now().isoformat())
+            if TOKEN and ALLOWED_CHAT:
+                send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
+            return record
+        filename, path = prepared
+        update_email_stage(intake_id, "extracting")
+        ai = gemini_extract(path) or {}
+        if not ai:
+            update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="ai_extraction_failed", processed_at=_utc_now().isoformat())
+            if TOKEN and ALLOWED_CHAT:
+                send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
+            return record
+        intent = intent_from_ai(ai, subject, body)
+        update_email_stage(intake_id, "applying", error=None)
+        if intent == "unknown":
+            update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="ai_status_missing", processed_at=_utc_now().isoformat())
+            if TOKEN and ALLOWED_CHAT:
+                send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
+            return record
+        if intent in {"cancelled", "refunded"}:
+            applied, reason = apply_email_cancellation(ai, record, status=intent)
+            update_email_record(intake_id, status="processed" if applied else "needs_review", intent=intent, lifecycle_action=intent if applied else "review", review_reason="" if applied else reason, processed_at=datetime.now(timezone.utc).isoformat())
+            if TOKEN and ALLOWED_CHAT:
+                send(ALLOWED_CHAT, email_notification(intent, record, review=not applied))
+            return record
+        if intent == "modified":
+            update_email_record(intake_id, status="needs_review", intent=intent, review_reason="replacement_requires_review", processed_at=_utc_now().isoformat())
+            if TOKEN and ALLOWED_CHAT:
+                send(ALLOWED_CHAT, email_notification(intent, record, review=True))
+            return record
+        try:
+            persisted_trip = find_email_trip(filename)
+            trip = persisted_trip or create_trip_from_document(filename, path, "Email", ai_override=ai)
+            persisted_trips = load_trips()
+            persisted_trip = next((item for item in persisted_trips if str(item.get("id")) == str(trip.get("id"))), trip)
+            decorate_trip_booking(persisted_trip, ai, filename, intake_id)
+            save_trips(persisted_trips)
+            trip = persisted_trip
+            update_email_record(intake_id, status="processed", intent=intent, processed_at=_utc_now().isoformat(), ingested_type=trip.get("_ingested_type", "hotel"), trip_id=trip.get("id"), document=filename, processing_error="")
+            if TOKEN and ALLOWED_CHAT:
+                send(ALLOWED_CHAT, email_notification(intent, record, trip=trip))
+            return record
+        except Exception as exc:
+            update_email_record(intake_id, status="needs_review", intent=intent, review_reason=f"{type(exc).__name__}: {str(exc)[:160]}", processed_at=_utc_now().isoformat())
+            update_email_stage(intake_id, "failed", error=exc)
+            if TOKEN and ALLOWED_CHAT:
+                send(ALLOWED_CHAT, email_notification(intent, record, review=True))
+            return record
     except Exception as exc:
-        update_email_record(intake_id, status="needs_review", intent=intent, review_reason=f"{type(exc).__name__}: {str(exc)[:160]}", processed_at=datetime.now(timezone.utc).isoformat())
-        if TOKEN and ALLOWED_CHAT:
-            send(ALLOWED_CHAT, email_notification(intent, record, review=True))
+        update_email_record(intake_id, status="needs_review", processed_at=_utc_now().isoformat())
+        update_email_stage(intake_id, "failed", error=exc)
+        return record
 
 
 def resume_pending_email_processing():
@@ -367,6 +569,12 @@ def resume_pending_email_processing():
 def extract_pdf_text(path):
     text = ""
     image_suffixes = {".jpg", ".jpeg", ".png", ".webp"}
+    if path.suffix.lower() in {".html", ".htm"}:
+        try: return html_to_text(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError: return ""
+    if path.suffix.lower() in {".txt", ".text"}:
+        try: return path.read_text(encoding="utf-8", errors="replace")
+        except OSError: return ""
     try:
         if path.suffix.lower() in image_suffixes:
             result = subprocess.run(["tesseract", str(path), "stdout", "-l", "eng"], capture_output=True, text=True, timeout=45)
@@ -386,11 +594,11 @@ def extract_pdf_text(path):
     try: return path.read_bytes().decode("utf-8", errors="ignore")
     except OSError: return ""
 
-def gemini_extract(path):
+def gemini_extract(path, mime_type=None):
     if not GEMINI_API_KEY: return None
     schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","restaurant","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"restaurant_name":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"address":{"type":"string"},"phone":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},"policy_number":{"type":"string"},"insurer":{"type":"string"},"insured_travelers":{"type":"array","items":{"type":"string"}},"valid_from":{"type":"string"},"valid_to":{"type":"string"},"coverage_summary":{"type":"string"},"covered_items":{"type":"array","items":{"type":"string"}},"exclusions":{"type":"array","items":{"type":"string"}},"what_to_do":{"type":"array","items":{"type":"string"}},"emergency_contacts":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"phone":{"type":"string"},"hours":{"type":"string"}}}},"source_language":{"type":"string"},"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type","status"]}
     prompt = "Classify this travel document, email or screenshot and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, restaurant, insurance, or other. status must describe the lifecycle of this booking message: confirmed for a new/active reservation, modified only when the reservation dates, route, room, passenger, or other booking facts were actually changed, cancelled only when the reservation itself was cancelled, and refunded only when a refund was actually issued. Do not infer modified or cancelled from generic footer text, a cancellation policy, refund policy, last-updated timestamps, account links, or instructions to update preferences. Never guess; use empty strings or empty arrays when a fact is absent. A restaurant reservation must include restaurant_name, date and time, and address/phone when clearly present. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel. Insurance is one trip-level policy: preserve only source facts, translate concise coverage and emergency instructions into plain Hebrew when the source is not Hebrew, and keep the original document as the source of truth. Do not invent coverage, exclusions, phone numbers, or medical advice."
-    mime_type = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain"}.get(path.suffix.lower(), "application/pdf")
+    mime_type = mime_type or {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain", ".html":"text/html", ".htm":"text/html"}.get(path.suffix.lower(), "application/pdf")
     payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":mime_type,"data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
     for attempt in range(3):
         try:
@@ -480,9 +688,9 @@ def infer_document_type(ai, text=""):
     return doc_type or "other"
 
 
-def create_trip_from_document(filename, path, source="Telegram", ai_override=None):
+def create_trip_from_document(filename, path, source="Telegram", ai_override=None, mime_type=None):
     text = extract_pdf_text(path)
-    ai = ai_override if ai_override is not None else (gemini_extract(path) or {})
+    ai = ai_override if ai_override is not None else (gemini_extract(path, mime_type=mime_type) or {})
     doc_type = infer_document_type(ai, text)
     if doc_type == "attraction" and not all(str(ai.get(k) or "").strip() for k in ("attraction", "date", "time", "location")):
         focused = gemini_extract_attraction(path)
@@ -494,7 +702,13 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         departure = str(ai.get("departure_date") or "").strip()
         arrival = str(ai.get("arrival_date") or departure).strip()
         required = [str(ai.get(k) or "").strip() for k in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_time")]
-        if not departure or not arrival or not all(required):
+        def valid_date(value):
+            try:
+                return bool(re.fullmatch(r"20\d{2}-\d{2}-\d{2}", value)) and datetime.fromisoformat(value).date().isoformat() == value
+            except ValueError:
+                return False
+        valid_time = lambda value: bool(re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value))
+        if not departure or not arrival or not all(required) or not valid_date(departure) or not valid_date(arrival) or not valid_time(str(ai.get("departure_time"))) or not valid_time(str(ai.get("arrival_time"))):
             raise ValueError("flight document missing unambiguous flight facts")
         trips = load_trips()
         target = dated_trip_target(trips, departure)
@@ -506,6 +720,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         target.setdefault("documents", []).append(filename)
         target["documents"] = list(dict.fromkeys(target["documents"]))
         target.setdefault("document_titles", {})[filename] = f"כרטיס טיסה · {ai.get('airline')} {ai.get('flight_number')}"
+        preserve_booking_metadata(target, source, status=str(ai.get("status") or "confirmed").strip().lower())
         save_trips(trips)
         events = load_events()
         if not any(len(e) > 6 and e[2] == event[2] and e[6] == departure for e in events):
@@ -523,6 +738,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         insurance["document"] = filename
         insurance["source_language"] = insurance.get("source_language") or str(ai.get("source_language") or "").strip()
         target["insurance"] = insurance
+        preserve_booking_metadata(target, source, status=str(ai.get("status") or "confirmed").strip().lower())
         target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = "ביטוח נסיעות לחו״ל"; save_trips(trips)
         return {**target, "_ingested_type": "insurance"}
     if doc_type == "restaurant":
@@ -532,7 +748,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         trips = load_trips(); target = dated_trip_target(trips, date)
         if not target: target = create_dated_trip_shell(trips, date, date, source, filename, f"טיול · {location or name}")
         record = {"name": name, "date": date, "time": time_value, "address": location, "location": location, "phone": phone, "supplier": str(ai.get("supplier") or "").strip(), "confirmation_number": str(ai.get("confirmation_number") or "").strip(), "document": filename, "status": "confirmed"}
-        target.setdefault("restaurants", []).append(record); target["restaurants"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["restaurants"]}.values()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"הזמנת מסעדה · {name}"; save_trips(trips)
+        target.setdefault("restaurants", []).append(record); target["restaurants"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["restaurants"]}.values()); preserve_booking_metadata(target, source, status=str(ai.get("status") or "confirmed").strip().lower()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"הזמנת מסעדה · {name}"; save_trips(trips)
         events = load_events(); event = [time_value, "🍽️", name, location or "הזמנת מסעדה", "מסעדה", source, date, location]
         if not any(len(e) > 6 and e[2] == name and e[6] == date for e in events): events.insert(0, event); save_events(events)
         return {**target, "_ingested_type": "restaurant"}
@@ -542,7 +758,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         trips = load_trips(); target = dated_trip_target(trips, pickup_date)
         if not target: target = create_dated_trip_shell(trips, pickup_date, str(ai.get("dropoff_date") or pickup_date).strip(), source, filename, f"טיול · {pickup_location}")
         record = {"pickup_date":pickup_date,"pickup_time":pickup_time,"pickup_location":pickup_location,"vehicle_type":vehicle_type,"dropoff_date":str(ai.get("dropoff_date") or "").strip(),"dropoff_time":str(ai.get("dropoff_time") or "").strip(),"dropoff_location":str(ai.get("dropoff_location") or "").strip(),"document":filename}
-        target.setdefault("rentals", []).append(record); target["rentals"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["rentals"]}.values()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"השכרת רכב · {vehicle_type}"; save_trips(trips)
+        target.setdefault("rentals", []).append(record); target["rentals"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["rentals"]}.values()); preserve_booking_metadata(target, source, status=str(ai.get("status") or "confirmed").strip().lower()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"השכרת רכב · {vehicle_type}"; save_trips(trips)
         events = load_events(); title = f"איסוף רכב · {vehicle_type}"; details = f"{pickup_location} · שעה {pickup_time}"; event = [pickup_time, "🚗", title, details, "רכב", source, pickup_date, pickup_location]
         if not any(len(e) > 6 and e[2] == title and e[6] == pickup_date for e in events): events.insert(0, event); save_events(events)
         if record["dropoff_date"] and record["dropoff_time"] and record["dropoff_location"]:
@@ -560,7 +776,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
             title = name; details = location; record = {"name":name,"location":location,"date":date,"time":time_value,"document":filename}; kind = "אטרקציה"; icon = "🎟️"
         trips = load_trips(); target = dated_trip_target(trips, date)
         if not target: target = create_dated_trip_shell(trips, date, date, source, filename, f"טיול · {name}")
-        key = "trains" if doc_type == "train" else "attractions"; target.setdefault(key, []).append(record); target[key] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target[key]}.values()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = ((f"כרטיס רכבת · {name}") if doc_type == "train" else f"אטרקציה · {name}"); save_trips(trips)
+        key = "trains" if doc_type == "train" else "attractions"; target.setdefault(key, []).append(record); target[key] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target[key]}.values()); preserve_booking_metadata(target, source, status=str(ai.get("status") or "confirmed").strip().lower()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = ((f"כרטיס רכבת · {name}") if doc_type == "train" else f"אטרקציה · {name}"); save_trips(trips)
         events = load_events(); event = [time_value, icon, title, details, kind, source, date, record.get("location", "")]
         if not any(len(e) > 6 and e[2] == title and e[6] == date for e in events): events.insert(0, event); save_events(events)
         return {**target, "_ingested_type": doc_type}
@@ -594,6 +810,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
     if all(re.fullmatch(r"20\d{2}-\d{2}-\d{2}", value) for value in ai_dates): dates = [(value[:4], value[5:7], value[8:10]) for value in ai_dates]
     start = "-".join(dates[0]) if dates else ""
     end = "-".join(dates[-1]) if len(dates) > 1 else start
+    start, end = validate_date_range(start, end)
     display_cities = list(dict.fromkeys((city_labels.get(x[0]) or x[0]) for x in cities))
     title = (" · ".join(dict.fromkeys(x[1] for x in cities))) or Path(filename).stem or "טיול חדש"
     title = title.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט").replace("Budapest", "בודפשט")
@@ -617,13 +834,6 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         except (TypeError, ValueError): return None
     new_start, new_end = as_date(start), as_date(end)
     match = next((existing for existing in trips if existing.get("document") == filename or filename in existing.get("documents", [])), None)
-    if not match and new_start and new_end:
-        for existing in trips:
-            old_start, old_end = as_date(existing.get("start")), as_date(existing.get("end"))
-            if not old_start or not old_end: continue
-            gap = max((new_start - old_end).days, (old_start - new_end).days, 0)
-            if gap <= 14:
-                match = existing; break
     if match:
         old_start, old_end = as_date(match.get("start")), as_date(match.get("end"))
         merged_start = min(x for x in (old_start, new_start) if x)
@@ -655,18 +865,19 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         else:
             match["documents"] = list(dict.fromkeys(match.get("documents", [match.get("document")] if match.get("document") else []) + [filename]))
             match["document_titles"] = {**match.get("document_titles", {}), **trip["document_titles"]}
-        booking = {"name": hotel, "city": display_cities[0] if display_cities else ai_city, "country": ai_country or (cities[0][1] if cities else ""), "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "address": address, "document": filename}
+        booking = {"name": hotel, "city": display_cities[0] if display_cities else ai_city, "country": ai_country or (cities[0][1] if cities else ""), "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "address": address, "supplier": str(ai.get("supplier") or "").strip(), "confirmation_number": str(ai.get("confirmation_number") or "").strip(), "document": filename}
         existing_hotels = match.get("hotels") or ([{"name": match.get("hotel"), "start": match.get("start"), "end": match.get("end"), "checkin_time": match.get("checkin_time", "14:00"), "checkout_time": match.get("checkout_time", "11:00")} ] if match.get("hotel") else [])
         if same_booking:
             existing_hotels = [h for h in existing_hotels if not (h.get("start") == start and h.get("end") == end)] + [booking]
         elif hotel:
             existing_hotels = [h for h in existing_hotels if not (h.get("start") == start and h.get("end") == end)] + [booking]
         match["hotels"] = existing_hotels
+        preserve_booking_metadata(match, source, status=str(ai.get("status") or "confirmed").strip().lower())
         if hotel and same_booking: match["hotel"] = hotel; match["checkin_time"] = checkin_time; match["checkout_time"] = checkout_time
         elif not match.get("hotel") and hotel: match["hotel"] = hotel
         save_trips(trips)
         return match
-    trips.insert(0, trip); save_trips(trips)
+    trips.insert(0, preserve_booking_metadata(trip, source, status=str(ai.get("status") or "confirmed").strip().lower())); save_trips(trips)
     return trip
 
 def delete_trip(trip_id):
@@ -686,6 +897,12 @@ def api(method, payload=None):
 def send(chat_id, text):
     api("sendMessage", {"chat_id": chat_id, "text": text})
 
+
+def download_telegram_file(file_path):
+    download_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
+    with urllib.request.urlopen(download_url, timeout=60) as response:
+        return response.read()
+
 def add_event(title, details, kind, source="Telegram", event_time=None):
     events = load_events()
     now = event_time or datetime.now().strftime("%H:%M")
@@ -695,7 +912,7 @@ def add_event(title, details, kind, source="Telegram", event_time=None):
     return event
 
 def ensure_hotel_events():
-    events = load_events()
+    events = [event_as_legacy_list(event, event[9] if isinstance(event, list) and len(event) > 9 else "") for event in load_events()]
     trips = load_trips()
     before = len(events)
     demo_markers = ("LX 162", "Ruby Mimi", "רכבת לציריך", "אישור חדש")
@@ -705,9 +922,11 @@ def ensure_hotel_events():
     cleaned = []
     for event in events:
         event_date = str(event[6] if len(event) > 6 else "")
-        key = (str(event[2]), event_date)
-        if key not in seen:
-            seen.add(key); cleaned.append(event)
+        trip_id = str(event[9]) if len(event) > 9 else ""
+        key = (trip_id, str(event[2]), event_date, str(event[4] if len(event) > 4 else ""))
+        if not trip_id or key not in seen:
+            if trip_id: seen.add(key)
+            cleaned.append(event)
     events = cleaned
     changed = len(events) != before
     trips_changed = False
@@ -788,19 +1007,22 @@ def ensure_hotel_events():
         docs = list(reversed(unique_docs))
         if trip.get("documents") != docs: trip["documents"] = docs; trips_changed = True
         if trip.get("document_titles") != titles: trip["document_titles"] = titles; trips_changed = True
+        event_trip_id = str(trip.get("id") or "")
         for booking in trip.get("hotels", []):
-            if booking.get("status") in {"cancelled", "superseded"}: continue
+            if booking.get("status") in {"cancelled", "refunded", "superseded"}: continue
             booking_hotel = booking.get("name") or hotel
             booking_start = booking.get("start")
             booking_end = booking.get("end")
             if booking_start:
-                key = ("צ׳ק-אין · " + booking_hotel, booking_start)
+                key = ("צ׳ק-אין · " + booking_hotel, booking_start, event_trip_id)
                 if key not in seen:
-                    events.insert(0, [booking.get("checkin_time", "14:00"), ICONS["מלון"], key[0], f"{booking_start} · שעה: {booking.get('checkin_time', '14:00')}", "מלון", "PDF", booking_start, booking.get("address") or booking.get("location") or ""]); seen.add(key); changed = True
+                    base_event = [booking.get("checkin_time", "14:00"), ICONS["מלון"], key[0], f"{booking_start} · שעה: {booking.get('checkin_time', '14:00')}", "מלון", "PDF", booking_start, booking.get("address") or booking.get("location") or ""]
+                    events.insert(0, event_as_legacy_list(base_event, event_trip_id)); seen.add(key); changed = True
             if booking_end and booking_end != booking_start:
-                key = ("צ׳ק-אאוט · " + booking_hotel, booking_end)
+                key = ("צ׳ק-אאוט · " + booking_hotel, booking_end, event_trip_id)
                 if key not in seen:
-                    events.insert(0, [booking.get("checkout_time", "11:00"), ICONS["מלון"], key[0], f"{booking_end} · שעה: {booking.get('checkout_time', '11:00')}", "מלון", "PDF", booking_end, booking.get("address") or booking.get("location") or ""]); seen.add(key); changed = True
+                    base_event = [booking.get("checkout_time", "11:00"), ICONS["מלון"], key[0], f"{booking_end} · שעה: {booking.get('checkout_time', '11:00')}", "מלון", "PDF", booking_end, booking.get("address") or booking.get("location") or ""]
+                    events.insert(0, event_as_legacy_list(base_event, event_trip_id)); seen.add(key); changed = True
         for rental in trip.get("rentals", []):
             if rental.get("pickup_date") and rental.get("pickup_time") and rental.get("pickup_location"):
                 key = ("איסוף רכב · " + str(rental.get("vehicle_type") or "רכב"), str(rental["pickup_date"]))
@@ -821,6 +1043,19 @@ def ensure_hotel_events():
     return events
 
 
+def parse_upload_multipart(body, content_type):
+    message = Message()
+    message["Content-Type"] = content_type
+    message.set_payload(body)
+    parsed = BytesParser(policy=policy.default).parsebytes(
+        b"Content-Type: " + content_type.encode() + b"\r\nMIME-Version: 1.0\r\n\r\n" + body
+    )
+    for part in parsed.walk():
+        if part.get_content_disposition() == "form-data" and part.get_param("name", header="content-disposition") == "file":
+            return Path(part.get_filename() or "").name, part.get_payload(decode=True) or b""
+    return "", b""
+
+
 def handle_message(message):
     chat = str(message.get("chat", {}).get("id", ""))
     if ALLOWED_CHAT and chat != ALLOWED_CHAT:
@@ -835,27 +1070,43 @@ def handle_message(message):
         send(chat, "\n".join(f"{e[0]} {e[1]} {e[2]} — {e[3]}" for e in events) or "אין עדיין אירועים שמורים.")
         return
     if message.get("document") or message.get("photo"):
-        item = message.get("document") or message.get("photo", [{}])[-1]
-        name = item.get("file_name", "telegram-photo.jpg")
+        item, declared_name, declared_mime = telegram_media_descriptor(message)
+        name = declared_name
+        intake_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        record = {"id": intake_id, "chat_id": chat, "file_id": item.get("file_id"), "filename": name, "declared_mime_type": declared_mime, "status": "received", "stage": "received", "created_at": datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()}
+        items = load_telegram_intake(); items.insert(0, record); save_telegram_intake(items)
         UPLOADS.mkdir(parents=True, exist_ok=True)
         try:
+            update_telegram_intake(intake_id, status="processing", stage="metadata")
             file_info = api("getFile", {"file_id": item["file_id"]})
             remote_name = Path(file_info.get("file_path", "")).name
-            suffix = Path(remote_name).suffix or Path(name).suffix or ".jpg"
-            if not Path(name).suffix: name += suffix
+            name = filename_for_mime(name, declared_mime, remote_name)
             local = UPLOADS / (datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S_") + Path(name).name)
-            download_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info['file_path']}"
-            with urllib.request.urlopen(download_url, timeout=60) as response: local.write_bytes(response.read())
-            trip = create_trip_from_document(local.name, local)
+            update_telegram_intake(intake_id, filename=name, remote_path=file_info.get("file_path", ""), stage="download")
+            local.write_bytes(download_telegram_file(file_info["file_path"]))
+            update_telegram_intake(intake_id, local_filename=local.name, stage="extract")
+            record["local_filename"] = local.name
+            record["stage"] = "extract"
+            trip = create_trip_from_document(local.name, local, "Telegram", mime_type=declared_mime)
             title = trip["title"]
             if trip.get("_ingested_type", "hotel") == "hotel" and trip.get("start"):
                 add_event("צ׳ק-אין · " + (trip.get("hotel") or title), f"{trip['start']} · שעה: {trip.get('checkin_time', '14:00')}", "מלון", event_time=trip.get("checkin_time", "14:00"))
             if trip.get("_ingested_type", "hotel") == "hotel" and trip.get("end") and trip.get("end") != trip.get("start"):
                 add_event("צ׳ק-אאוט · " + (trip.get("hotel") or title), f"{trip['end']} · שעה: {trip.get('checkout_time', '11:00')}", "מלון", event_time=trip.get("checkout_time", "11:00"))
-            send(chat, f"קיבלתי את {name} ✅\\nעודכן הטיול: {title}")
+            update_telegram_intake(intake_id, status="processed", stage="persisted", trip_id=trip.get("id"), ingested_type=trip.get("_ingested_type", "hotel"))
+            try:
+                send(chat, f"קיבלתי את {name} ✅\\nעודכן הטיול: {title}")
+                update_telegram_intake(intake_id, stage="acknowledged")
+            except Exception as ack_exc:
+                update_telegram_intake(intake_id, stage="acknowledgement_failed", error=f"acknowledge: {type(ack_exc).__name__}: {str(ack_exc)[:160]}")
         except Exception as exc:
             print("Document processing error:", exc, flush=True)
-            send(chat, f"יש בעיה בזיהוי האישור ❌\nלא עודכן הלוז. צריך לזהות בוודאות שם מלון, יעד ותאריכים.")
+            stage = "download" if not record.get("local_filename") else ("extract" if record.get("stage") != "persisted" else "persist")
+            update_telegram_intake(intake_id, status="failed", stage=stage, error=f"{stage}: {type(exc).__name__}: {str(exc)[:160]}")
+            try:
+                send(chat, f"יש בעיה בזיהוי האישור ❌\nלא עודכן הלוז. צריך לזהות בוודאות שם מלון, יעד ותאריכים.")
+            except Exception as ack_exc:
+                update_telegram_intake(intake_id, error=f"{stage}: {type(exc).__name__}; acknowledge: {type(ack_exc).__name__}")
         return
     if not text:
         send(chat, "שלח טקסט עם פרטי הזמנה או קובץ.")
@@ -913,9 +1164,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
         if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": load_trips()}); return
         if path == "/api/intake/email":
-            fields = ("id", "status", "intent", "subject", "from", "to", "date", "received_at", "processed_at", "ingested_type", "trip_id", "review_reason", "attachments")
+            fields = ("id", "status", "intent", "subject", "from", "to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "ingested_type", "trip_id", "review_reason", "attachments")
             emails = [{key: record.get(key) for key in fields} for record in load_email_index()]
             self._json(200, {"emails": emails}); return
+        if path == "/api/intake/telegram":
+            self._json(200, {"intake": load_telegram_intake()}); return
         if path.startswith("/api/documents/"):
             filename = Path(urllib.parse.unquote(path[len("/api/documents/"):])).name
             file_path = UPLOADS / filename
@@ -923,7 +1176,7 @@ class Handler(BaseHTTPRequestHandler):
                 candidates = sorted(UPLOADS.glob("*_" + filename), key=lambda p: p.stat().st_mtime, reverse=True)
                 file_path = candidates[0] if candidates else file_path
             if file_path.exists() and file_path.is_file():
-                raw = file_path.read_bytes(); self.send_response(200); self.send_header("Content-Type", "application/pdf"); self.send_header("Content-Disposition", "inline; filename*=UTF-8''" + urllib.parse.quote(filename)); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
+                raw = file_path.read_bytes(); self.send_response(200); self.send_header("Content-Type", document_content_type(file_path)); self.send_header("Content-Disposition", "inline; filename*=UTF-8''" + urllib.parse.quote(filename)); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
             self._json(404, {"error": "document_not_found"}); return
         if path in ("/", "/index.html"):
             raw = (ROOT / "index.html").read_bytes(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
@@ -954,16 +1207,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/upload":
             try:
                 length = int(self.headers.get("Content-Length", "0")); body = self.rfile.read(length)
-                form = cgi.FieldStorage(fp=io.BytesIO(body), headers=self.headers, environ={"REQUEST_METHOD":"POST", "CONTENT_TYPE":self.headers.get("Content-Type", ""), "CONTENT_LENGTH":str(length)})
-                item = form["file"] if "file" in form else None
-                if not item or not getattr(item, "filename", ""):
+                filename, file_bytes = parse_upload_multipart(body, self.headers.get("Content-Type", ""))
+                if not filename:
                     self._json(400, {"error":"file_required"}); return
-                filename = Path(item.filename).name
+                filename = Path(filename).name
                 if Path(filename).suffix.lower() not in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}:
                     self._json(400, {"error":"unsupported_file_type"}); return
                 UPLOADS.mkdir(parents=True, exist_ok=True)
                 stored = f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}_{filename}"
-                path = UPLOADS / stored; path.write_bytes(item.file.read())
+                path = UPLOADS / stored; path.write_bytes(file_bytes)
                 trip = create_trip_from_document(stored, path, "Web")
                 self._json(201, {"trip":trip, "filename":filename}); return
             except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:

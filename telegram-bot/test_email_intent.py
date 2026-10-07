@@ -24,6 +24,16 @@ class EmailIntentTests(unittest.TestCase):
             'cancelled',
         )
 
+    def test_ai_preserves_refunded_as_distinct_lifecycle_intent(self):
+        self.assertEqual(
+            server.intent_from_ai(
+                {'type': 'hotel', 'status': 'refunded'},
+                'Refund processed',
+                'Your refund was issued.',
+            ),
+            'refunded',
+        )
+
     def test_missing_ai_status_is_review_not_a_guess(self):
         self.assertEqual(
             server.intent_from_ai(

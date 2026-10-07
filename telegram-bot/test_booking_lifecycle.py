@@ -1,6 +1,13 @@
 import unittest
 
-from booking_lifecycle import find_booking_matches, cancel_booking
+from booking_lifecycle import (
+    BookingDateError,
+    booking_identity,
+    cancel_booking,
+    enrich_booking_lifecycle,
+    find_booking_matches,
+    validate_date_range,
+)
 
 
 class BookingLifecycleTests(unittest.TestCase):
@@ -42,6 +49,28 @@ class BookingLifecycleTests(unittest.TestCase):
         self.assertEqual(booking["status"], "cancelled")
         self.assertEqual(booking["cancelled_by_email"], "email-1")
         self.assertEqual(booking["name"], "Hotel One")
+
+    def test_dates_require_strict_iso_and_non_reversed_ranges(self):
+        self.assertEqual(validate_date_range("2026-10-10", "2026-10-12"), ("2026-10-10", "2026-10-12"))
+        with self.assertRaises(BookingDateError):
+            validate_date_range("October 10, 2026", "2026-10-12")
+        with self.assertRaises(BookingDateError):
+            validate_date_range("2026-10-12", "2026-10-10")
+
+    def test_booking_identity_prefers_confirmation_number(self):
+        self.assertEqual(
+            booking_identity("hotel", {"confirmation_number": " AbC123 ", "name": "Other", "start": "2026-10-10", "end": "2026-10-12"}),
+            ("hotel", "confirmation_number", "abc123"),
+        )
+
+    def test_lifecycle_enrichment_preserves_source_and_history(self):
+        booking = {"name": "Hotel One"}
+        enrich_booking_lifecycle(booking, source="Email", source_email_id="email-1", status="confirmed")
+        self.assertEqual(booking["source"], "Email")
+        self.assertEqual(booking["source_email_id"], "email-1")
+        self.assertEqual(booking["status"], "confirmed")
+        self.assertEqual(booking["lifecycle_status"], "confirmed")
+        self.assertEqual(booking["lifecycle_history"][0]["status"], "confirmed")
 
 
 if __name__ == "__main__":
