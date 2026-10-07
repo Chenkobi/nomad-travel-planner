@@ -7,7 +7,7 @@ TRAVEL_MARKERS = (
     "attraction", "ticket", "voucher", "travel", "trip", "pickup", "drop-off",
     "cancellation", "cancelled", "canceled", "refund", "変更",
 )
-CANCEL_MARKERS = ("cancelled", "canceled", "cancellation", "cancel", "refund", "void")
+CANCEL_MARKERS = ("cancelled", "canceled", "cancel", "void")
 MODIFY_MARKERS = ("changed", "change", "modified", "modification", "updated", "update", "rebooked", "rescheduled")
 CONFIRM_MARKERS = ("confirmation", "confirmed", "reservation", "booking", "voucher", "ticket", "itinerary")
 
@@ -23,7 +23,8 @@ def looks_like_travel_email(subject, body):
 
 def classify_email_intent(subject, body):
     text = _normalized(subject, body)
-    if any(marker in text for marker in CANCEL_MARKERS):
+    cancellation_language = re.search(r"\b(?:reservation|booking|confirmation|itinerary|flight|hotel|trip)\b.{0,60}\b(?:cancelled|canceled|cancel|voided)\b|\b(?:cancelled|canceled|voided)\b.{0,60}\b(?:reservation|booking|confirmation|itinerary|flight|hotel|trip)\b|\b(?:refund issued|refund processed|refunded in full|cancellation confirmed)\b", text)
+    if cancellation_language:
         return "cancelled"
     if any(marker in text for marker in MODIFY_MARKERS):
         return "modified"

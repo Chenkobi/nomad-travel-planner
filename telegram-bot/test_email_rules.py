@@ -25,6 +25,13 @@ class EmailRulesTests(unittest.TestCase):
         )
         self.assertEqual(intent, "confirmed")
 
+    def test_confirmation_with_cancellation_policy_is_not_classified_as_cancelled(self):
+        intent = classify_email_intent(
+            "Reservation Confirmation #70021413 for Sheraton Batumi Hotel",
+            "Your reservation is confirmed. Cancellation policy: free cancellation until October 18, 2026.",
+        )
+        self.assertEqual(intent, "confirmed")
+
     def test_unrelated_message_is_not_travel_email(self):
         self.assertFalse(looks_like_travel_email("Dinner tonight", "See you at 20:00."))
 
