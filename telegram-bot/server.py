@@ -204,9 +204,15 @@ def process_incoming_email(record):
         if TOKEN and ALLOWED_CHAT:
             send(ALLOWED_CHAT, email_notification(intent, record, trip=trip))
     except Exception as exc:
-        update_email_record(intake_id, status="needs_review", intent=intent, review_reason=type(exc).__name__, processed_at=datetime.now(timezone.utc).isoformat())
+        update_email_record(intake_id, status="needs_review", intent=intent, review_reason=f"{type(exc).__name__}: {str(exc)[:160]}", processed_at=datetime.now(timezone.utc).isoformat())
         if TOKEN and ALLOWED_CHAT:
             send(ALLOWED_CHAT, email_notification(intent, record, review=True))
+
+
+def resume_pending_email_processing():
+    for record in load_email_index():
+        if record.get("status") in {"received", "processing"}:
+            threading.Thread(target=process_incoming_email, args=(record,), daemon=True).start()
 
 def extract_pdf_text(path):
     text = ""
@@ -723,6 +729,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(502, {"error":"rates_unavailable"}); return
         if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
         if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": load_trips()}); return
+        if path == "/api/intake/email":
+            fields = ("id", "status", "intent", "subject", "from", "to", "date", "received_at", "processed_at", "ingested_type", "trip_id", "review_reason", "attachments")
+            emails = [{key: record.get(key) for key in fields} for record in load_email_index()]
+            self._json(200, {"emails": emails}); return
         if path.startswith("/api/documents/"):
             filename = Path(urllib.parse.unquote(path[len("/api/documents/"):])).name
             file_path = UPLOADS / filename
@@ -842,6 +852,7 @@ def main():
     if not TOKEN: raise SystemExit("Set TELEGRAM_BOT_TOKEN before starting TRIPY bot")
     api("deleteWebhook")
     threading.Thread(target=poll, daemon=True).start()
+    resume_pending_email_processing()
     print(f"TRIPY bot/API listening on http://127.0.0.1:{PORT}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
