@@ -26,7 +26,9 @@ def classify_email_intent(subject, body):
     cancellation_language = re.search(r"\b(?:reservation|booking|confirmation|itinerary|flight|hotel|trip)\b.{0,60}\b(?:cancelled|canceled|cancel|voided)\b|\b(?:cancelled|canceled|voided)\b.{0,60}\b(?:reservation|booking|confirmation|itinerary|flight|hotel|trip)\b|\b(?:refund issued|refund processed|refunded in full|cancellation confirmed)\b", text)
     if cancellation_language:
         return "cancelled"
-    if any(marker in text for marker in MODIFY_MARKERS):
+    modification_text = re.sub(r"\blast updated\b|\bupdate your (?:email )?preferences\b", "", text)
+    modification_language = re.search(r"\b(?:reservation|booking|itinerary|flight|hotel|trip|dates|date|time|room|route)\b.{0,60}\b(?:changed|change|modified|modification|updated|update|rebooked|rescheduled)\b|\b(?:changed|modified|rebooked|rescheduled)\b.{0,60}\b(?:reservation|booking|itinerary|flight|hotel|trip|dates|date|time|room|route)\b", modification_text)
+    if modification_language:
         return "modified"
     if any(marker in text for marker in CONFIRM_MARKERS):
         return "confirmed"

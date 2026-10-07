@@ -32,6 +32,13 @@ class EmailRulesTests(unittest.TestCase):
         )
         self.assertEqual(intent, "confirmed")
 
+    def test_confirmation_with_generic_updated_footer_is_not_modified(self):
+        intent = classify_email_intent(
+            "Reservation Confirmation #70021413 for Sheraton Batumi Hotel",
+            "Your reservation is confirmed. Last updated: October 7, 2026. Update your email preferences in your account.",
+        )
+        self.assertEqual(intent, "confirmed")
+
     def test_unrelated_message_is_not_travel_email(self):
         self.assertFalse(looks_like_travel_email("Dinner tonight", "See you at 20:00."))
 
