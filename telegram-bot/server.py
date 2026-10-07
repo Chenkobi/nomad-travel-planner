@@ -226,6 +226,14 @@ def email_notification(intent, record, trip=None, review=False):
     return f"TRIPY: {action}\n{subject}"
 
 
+def intent_from_ai(ai, subject="", body=""):
+    status = str((ai or {}).get("status") or "").strip().lower()
+    status_map = {"confirmed": "confirmed", "modified": "modified", "cancelled": "cancelled", "refunded": "cancelled"}
+    if status in status_map:
+        return status_map[status]
+    return "unknown"
+
+
 def lifecycle_facts(ai):
     facts = dict(ai or {})
     facts["start"] = facts.get("start") or facts.get("check_in") or facts.get("departure_date") or facts.get("date") or facts.get("pickup_date")
@@ -291,20 +299,29 @@ def process_incoming_email(record):
     intake_id = record.get("id")
     update_email_record(intake_id, status="processing", processing_started_at=datetime.now(timezone.utc).isoformat())
     subject = str(record.get("subject") or "")
-    body_path = email_record_folder(record) / "body.txt"
     body = email_body_text(record)
-    intent = classify_email_intent(subject, body)
     if not looks_like_travel_email(subject, body):
         update_email_record(intake_id, status="ignored", intent="unknown", processed_at=datetime.now(timezone.utc).isoformat())
         return
     prepared = prepare_email_source(record)
     if not prepared:
-        update_email_record(intake_id, status="needs_review", intent=intent, review_reason="no_supported_attachment_or_text", processed_at=datetime.now(timezone.utc).isoformat())
+        update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="no_supported_attachment_or_text", processed_at=datetime.now(timezone.utc).isoformat())
         if TOKEN and ALLOWED_CHAT:
-            send(ALLOWED_CHAT, email_notification(intent, record, review=True))
+            send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
         return
     filename, path = prepared
     ai = gemini_extract(path) or {}
+    if not ai:
+        update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="ai_extraction_failed", processed_at=datetime.now(timezone.utc).isoformat())
+        if TOKEN and ALLOWED_CHAT:
+            send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
+        return
+    intent = intent_from_ai(ai, subject, body)
+    if intent == "unknown":
+        update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="ai_status_missing", processed_at=datetime.now(timezone.utc).isoformat())
+        if TOKEN and ALLOWED_CHAT:
+            send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
+        return
     if intent == "cancelled":
         applied, reason = apply_email_cancellation(ai, record)
         update_email_record(intake_id, status="processed" if applied else "needs_review", intent=intent, lifecycle_action="cancelled" if applied else "review", review_reason="" if applied else reason, processed_at=datetime.now(timezone.utc).isoformat())
@@ -361,8 +378,8 @@ def extract_pdf_text(path):
 
 def gemini_extract(path):
     if not GEMINI_API_KEY: return None
-    schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","restaurant","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"restaurant_name":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"address":{"type":"string"},"phone":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},"policy_number":{"type":"string"},"insurer":{"type":"string"},"insured_travelers":{"type":"array","items":{"type":"string"}},"valid_from":{"type":"string"},"valid_to":{"type":"string"},"coverage_summary":{"type":"string"},"covered_items":{"type":"array","items":{"type":"string"}},"exclusions":{"type":"array","items":{"type":"string"}},"what_to_do":{"type":"array","items":{"type":"string"}},"emergency_contacts":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"phone":{"type":"string"},"hours":{"type":"string"}}}},"source_language":{"type":"string"},"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type"]}
-    prompt = "Classify this travel document, email or screenshot and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, restaurant, insurance, or other. Never guess; use empty strings or empty arrays when a fact is absent. A restaurant reservation must include restaurant_name, date and time, and address/phone when clearly present. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel. Insurance is one trip-level policy: preserve only source facts, translate concise coverage and emergency instructions into plain Hebrew when the source is not Hebrew, and keep the original document as the source of truth. Do not invent coverage, exclusions, phone numbers, or medical advice."
+    schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","restaurant","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"restaurant_name":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"address":{"type":"string"},"phone":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},"policy_number":{"type":"string"},"insurer":{"type":"string"},"insured_travelers":{"type":"array","items":{"type":"string"}},"valid_from":{"type":"string"},"valid_to":{"type":"string"},"coverage_summary":{"type":"string"},"covered_items":{"type":"array","items":{"type":"string"}},"exclusions":{"type":"array","items":{"type":"string"}},"what_to_do":{"type":"array","items":{"type":"string"}},"emergency_contacts":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"phone":{"type":"string"},"hours":{"type":"string"}}}},"source_language":{"type":"string"},"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type","status"]}
+    prompt = "Classify this travel document, email or screenshot and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, restaurant, insurance, or other. status must describe the lifecycle of this booking message: confirmed for a new/active reservation, modified only when the reservation dates, route, room, passenger, or other booking facts were actually changed, cancelled only when the reservation itself was cancelled, and refunded only when a refund was actually issued. Do not infer modified or cancelled from generic footer text, a cancellation policy, refund policy, last-updated timestamps, account links, or instructions to update preferences. Never guess; use empty strings or empty arrays when a fact is absent. A restaurant reservation must include restaurant_name, date and time, and address/phone when clearly present. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel. Insurance is one trip-level policy: preserve only source facts, translate concise coverage and emergency instructions into plain Hebrew when the source is not Hebrew, and keep the original document as the source of truth. Do not invent coverage, exclusions, phone numbers, or medical advice."
     mime_type = {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain"}.get(path.suffix.lower(), "application/pdf")
     payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":mime_type,"data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
     for attempt in range(3):
