@@ -140,12 +140,12 @@ def email_record_folder(record):
 
 
 def email_attachment_candidates(record):
-    supported = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+    supported = {"application/pdf", "image/jpeg", "image/png", "image/webp", "text/html"}
     folder = email_record_folder(record)
     candidates = []
     for attachment in record.get("attachments", []):
         suffix = Path(str(attachment.get("filename") or "")).suffix.lower()
-        if attachment.get("content_type") not in supported and suffix not in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}:
+        if attachment.get("content_type") not in supported and suffix not in {".pdf", ".html", ".htm", ".jpg", ".jpeg", ".png", ".webp"}:
             continue
         source = folder / str(attachment.get("path") or "")
         if source.is_file():
@@ -201,7 +201,15 @@ def prepare_email_source(record):
     candidates = email_attachment_candidates(record)
     if candidates:
         source, attachment = candidates[0]
-        filename = safe_email_filename(attachment.get("filename"), "email-attachment.bin")
+        original_name = safe_email_filename(attachment.get("filename"), "email-attachment.bin")
+        if Path(original_name).suffix.lower() in {".html", ".htm"}:
+            filename = f"email-{record.get('id', 'message')}-{Path(original_name).stem}.txt"
+            target = UPLOADS / f"email_{record.get('id', 'message')}_{filename}"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            html = source.read_text(encoding="utf-8", errors="replace")
+            target.write_text(html_to_text(html), encoding="utf-8")
+            return target.name, target
+        filename = original_name
     else:
         source = email_record_folder(record) / "body.txt"
         filename = f"email-{record.get('id', 'message')}.txt"
@@ -278,6 +286,8 @@ def create_dated_trip_shell(trips, start, end, source, filename, title="טיול
         days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
     except ValueError as exc:
         raise ValueError("booking dates are not ISO dates") from exc
+    if end < start:
+        raise ValueError("booking end date precedes start date")
     trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title or "טיול חדש", "start": start, "end": end, "days": days, "source": source, "document": filename, "documents": [filename], "image": "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80", "images": ["https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"], "destinations": [], "hotels": [], "flights": [], "trains": [], "attractions": [], "rentals": [], "restaurants": [], "document_titles": {filename: "אישור הזמנה"}}
     trips.append(trip)
     return trip
@@ -300,11 +310,11 @@ def process_incoming_email(record):
     update_email_record(intake_id, status="processing", processing_started_at=datetime.now(timezone.utc).isoformat())
     subject = str(record.get("subject") or "")
     body = email_body_text(record)
-    if not looks_like_travel_email(subject, body):
-        update_email_record(intake_id, status="ignored", intent="unknown", processed_at=datetime.now(timezone.utc).isoformat())
-        return
     prepared = prepare_email_source(record)
     if not prepared:
+        if not looks_like_travel_email(subject, body):
+            update_email_record(intake_id, status="ignored", intent="unknown", processed_at=datetime.now(timezone.utc).isoformat())
+            return
         update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="no_supported_attachment_or_text", processed_at=datetime.now(timezone.utc).isoformat())
         if TOKEN and ALLOWED_CHAT:
             send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
@@ -483,7 +493,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
     if doc_type == "flight":
         departure = str(ai.get("departure_date") or "").strip()
         arrival = str(ai.get("arrival_date") or departure).strip()
-        required = [str(ai.get(k) or "").strip() for k in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_date", "arrival_time")]
+        required = [str(ai.get(k) or "").strip() for k in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_time")]
         if not departure or not arrival or not all(required):
             raise ValueError("flight document missing unambiguous flight facts")
         trips = load_trips()
@@ -595,7 +605,8 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
     checkin_time = str(ai.get("check_in_time") or "14:00").strip()
     checkout_time = str(ai.get("check_out_time") or "11:00").strip()
     document_title = (f"אישור מלון · {hotel}" if hotel else "אישור הזמנה")
-    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "documents": [filename], "image": image, "images": images, "destinations": destinations, "hotel": hotel, "hotels": [{"name": hotel, "city": display_cities[0] if display_cities else ai_city, "country": ai_country or (cities[0][1] if cities else ""), "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "document": filename}], "checkin_time": checkin_time, "checkout_time": checkout_time, "document_titles": {filename: document_title}}
+    address = str(ai.get("address") or ai.get("location") or "").strip()
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "documents": [filename], "image": image, "images": images, "destinations": destinations, "hotel": hotel, "hotels": [{"name": hotel, "city": display_cities[0] if display_cities else ai_city, "country": ai_country or (cities[0][1] if cities else ""), "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "address": address, "document": filename}], "checkin_time": checkin_time, "checkout_time": checkout_time, "document_titles": {filename: document_title}}
     if start and end:
         trip["days"] = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
     if not validate_booking_trip(trip):
@@ -644,7 +655,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         else:
             match["documents"] = list(dict.fromkeys(match.get("documents", [match.get("document")] if match.get("document") else []) + [filename]))
             match["document_titles"] = {**match.get("document_titles", {}), **trip["document_titles"]}
-        booking = {"name": hotel, "city": display_cities[0] if display_cities else ai_city, "country": ai_country or (cities[0][1] if cities else ""), "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "document": filename}
+        booking = {"name": hotel, "city": display_cities[0] if display_cities else ai_city, "country": ai_country or (cities[0][1] if cities else ""), "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "address": address, "document": filename}
         existing_hotels = match.get("hotels") or ([{"name": match.get("hotel"), "start": match.get("start"), "end": match.get("end"), "checkin_time": match.get("checkin_time", "14:00"), "checkout_time": match.get("checkout_time", "11:00")} ] if match.get("hotel") else [])
         if same_booking:
             existing_hotels = [h for h in existing_hotels if not (h.get("start") == start and h.get("end") == end)] + [booking]
@@ -785,11 +796,11 @@ def ensure_hotel_events():
             if booking_start:
                 key = ("צ׳ק-אין · " + booking_hotel, booking_start)
                 if key not in seen:
-                    events.insert(0, [booking.get("checkin_time", "14:00"), ICONS["מלון"], key[0], f"{booking_start} · שעה: {booking.get('checkin_time', '14:00')}", "מלון", "PDF", booking_start]); seen.add(key); changed = True
+                    events.insert(0, [booking.get("checkin_time", "14:00"), ICONS["מלון"], key[0], f"{booking_start} · שעה: {booking.get('checkin_time', '14:00')}", "מלון", "PDF", booking_start, booking.get("address") or booking.get("location") or ""]); seen.add(key); changed = True
             if booking_end and booking_end != booking_start:
                 key = ("צ׳ק-אאוט · " + booking_hotel, booking_end)
                 if key not in seen:
-                    events.insert(0, [booking.get("checkout_time", "11:00"), ICONS["מלון"], key[0], f"{booking_end} · שעה: {booking.get('checkout_time', '11:00')}", "מלון", "PDF", booking_end]); seen.add(key); changed = True
+                    events.insert(0, [booking.get("checkout_time", "11:00"), ICONS["מלון"], key[0], f"{booking_end} · שעה: {booking.get('checkout_time', '11:00')}", "מלון", "PDF", booking_end, booking.get("address") or booking.get("location") or ""]); seen.add(key); changed = True
         for rental in trip.get("rentals", []):
             if rental.get("pickup_date") and rental.get("pickup_time") and rental.get("pickup_location"):
                 key = ("איסוף רכב · " + str(rental.get("vehicle_type") or "רכב"), str(rental["pickup_date"]))

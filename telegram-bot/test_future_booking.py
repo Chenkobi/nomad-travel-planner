@@ -34,6 +34,29 @@ class FutureBookingTests(unittest.TestCase):
             finally:
                 server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
 
+    def test_same_day_flight_can_omit_arrival_date(self):
+        ai = {
+            'type': 'flight', 'airline': 'Arkia', 'flight_number': 'IZ124',
+            'origin': 'Tel Aviv', 'destination': 'Athens',
+            'departure_date': '2026-12-10', 'departure_time': '08:30',
+            'arrival_time': '11:00',
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                server.DATA = root / 'events.json'; server.TRIPS = root / 'trips.json'; server.UPLOADS = root / 'uploads'
+                server.save_trips([]); server.save_events([])
+                source = root / 'arkia.pdf'; source.write_bytes(b'%PDF fake')
+                trip = server.create_trip_from_document('arkia.pdf', source, 'Telegram', ai_override=ai)
+                self.assertEqual(trip['flights'][0]['arrival_date'], '2026-12-10')
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
+
+    def test_reversed_dated_shell_is_rejected(self):
+        with self.assertRaises(ValueError):
+            server.create_dated_trip_shell([], '2026-12-10', '2026-12-09', 'Email', 'bad.txt')
+
 
 if __name__ == '__main__':
     unittest.main()
