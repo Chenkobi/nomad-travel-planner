@@ -8,6 +8,8 @@ from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from email_rules import classify_email_intent, looks_like_travel_email
+
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.getenv("TRIPY_DATA_FILE", ROOT / "trip-data.json"))
 TRIPS = DATA.with_name("trips.json")
@@ -117,6 +119,94 @@ def store_incoming_email(raw):
         record = {"id": intake_id, "status": "received", "source": "Email", "dedupe_key": dedupe_key, "sha256": digest, "message_id": message_id, "from": decode_email_header(message.get("From")), "to": decode_email_header(message.get("To")), "subject": decode_email_header(message.get("Subject")), "date": decode_email_header(message.get("Date")), "received_at": datetime.now(timezone.utc).isoformat(), "source_file": f"{intake_id}/source.eml", "body_file": f"{intake_id}/body.txt", "attachments": attachments}
         items = load_email_index(); items.insert(0, record); save_email_index(items)
         return record, False
+
+
+def update_email_record(intake_id, **changes):
+    with LOCK:
+        items = load_email_index()
+        for record in items:
+            if record.get("id") == intake_id:
+                record.update(changes)
+                save_email_index(items)
+                return record
+    return None
+
+
+def email_record_folder(record):
+    return EMAIL_DIR / str(record.get("id"))
+
+
+def email_attachment_candidates(record):
+    supported = {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+    folder = email_record_folder(record)
+    candidates = []
+    for attachment in record.get("attachments", []):
+        if attachment.get("content_type") not in supported:
+            continue
+        source = folder / str(attachment.get("path") or "")
+        if source.is_file():
+            candidates.append((source, attachment))
+    return candidates
+
+
+def prepare_email_source(record):
+    candidates = email_attachment_candidates(record)
+    if candidates:
+        source, attachment = candidates[0]
+        filename = safe_email_filename(attachment.get("filename"), "email-attachment.bin")
+    else:
+        source = email_record_folder(record) / "body.txt"
+        filename = f"email-{record.get('id', 'message')}.txt"
+        if not source.is_file() or not source.read_text(encoding="utf-8", errors="replace").strip():
+            return None
+    UPLOADS.mkdir(parents=True, exist_ok=True)
+    stored = f"email_{record.get('id', 'message')}_{filename}"
+    target = UPLOADS / stored
+    if not target.exists():
+        shutil.copyfile(source, target)
+    return stored, target
+
+
+def email_notification(intent, record, trip=None, review=False):
+    subject = str(record.get("subject") or "מייל נסיעות").strip()
+    if review:
+        return f"TRIPY: מייל נסיעות ממתין לבדיקה\n{subject}"
+    action = {"confirmed": "נוספה הזמנה", "modified": "התקבל שינוי", "cancelled": "התקבל ביטול"}.get(intent, "התקבל מייל")
+    return f"TRIPY: {action}\n{subject}"
+
+
+def process_incoming_email(record):
+    """Process one persisted MIME record without losing it on parser failure."""
+    intake_id = record.get("id")
+    update_email_record(intake_id, status="processing", processing_started_at=datetime.now(timezone.utc).isoformat())
+    subject = str(record.get("subject") or "")
+    body_path = email_record_folder(record) / "body.txt"
+    body = body_path.read_text(encoding="utf-8", errors="replace") if body_path.is_file() else ""
+    intent = classify_email_intent(subject, body)
+    if not looks_like_travel_email(subject, body):
+        update_email_record(intake_id, status="ignored", intent="unknown", processed_at=datetime.now(timezone.utc).isoformat())
+        return
+    if intent in ("cancelled", "modified"):
+        update_email_record(intake_id, status="needs_review", intent=intent, review_reason="lifecycle_matching_not_enabled", processed_at=datetime.now(timezone.utc).isoformat())
+        if TOKEN and ALLOWED_CHAT:
+            send(ALLOWED_CHAT, email_notification(intent, record, review=True))
+        return
+    prepared = prepare_email_source(record)
+    if not prepared:
+        update_email_record(intake_id, status="needs_review", intent=intent, review_reason="no_supported_attachment_or_text", processed_at=datetime.now(timezone.utc).isoformat())
+        if TOKEN and ALLOWED_CHAT:
+            send(ALLOWED_CHAT, email_notification(intent, record, review=True))
+        return
+    filename, path = prepared
+    try:
+        trip = create_trip_from_document(filename, path, "Email")
+        update_email_record(intake_id, status="processed", intent=intent, processed_at=datetime.now(timezone.utc).isoformat(), ingested_type=trip.get("_ingested_type", "hotel"), trip_id=trip.get("id"), document=filename)
+        if TOKEN and ALLOWED_CHAT:
+            send(ALLOWED_CHAT, email_notification(intent, record, trip=trip))
+    except Exception as exc:
+        update_email_record(intake_id, status="needs_review", intent=intent, review_reason=type(exc).__name__, processed_at=datetime.now(timezone.utc).isoformat())
+        if TOKEN and ALLOWED_CHAT:
+            send(ALLOWED_CHAT, email_notification(intent, record, review=True))
 
 def extract_pdf_text(path):
     text = ""
@@ -663,6 +753,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(413, {"error": "email_size_invalid"}); return
                 raw = self.rfile.read(length)
                 record, duplicate = store_incoming_email(raw)
+                if not duplicate:
+                    threading.Thread(target=process_incoming_email, args=(record,), daemon=True).start()
                 self._json(202 if not duplicate else 200, {"intake": record, "duplicate": duplicate}); return
             except (OSError, ValueError, TypeError):
                 self._json(400, {"error": "invalid_email"}); return
