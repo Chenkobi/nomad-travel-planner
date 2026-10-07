@@ -1,0 +1,9 @@
+.git
+.env
+.env.*
+trip-data.json
+trip-uploads
+mockups
+telegram-bot/__pycache__
+**/__pycache__
+*.pyc

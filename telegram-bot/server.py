@@ -32,15 +32,26 @@ PORT = int(os.getenv("PORT", "8787"))
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 EMAIL_INTAKE_SECRET = os.getenv("TRIPY_INTAKE_SECRET", "").strip()
+API_AUTH_TOKEN = os.getenv("TRIPY_API_AUTH_TOKEN", "").strip()
+API_ALLOWED_ORIGIN = os.getenv("TRIPY_API_ALLOWED_ORIGIN", "https://trip.atlasim.co.il").strip()
 EMAIL_DIR = Path(os.getenv("TRIPY_EMAIL_DIR", ROOT / "trip-email"))
 EMAIL_INDEX = EMAIL_DIR / "index.json"
 TELEGRAM_INTAKE = Path(os.getenv("TRIPY_TELEGRAM_INTAKE_FILE", ROOT / "telegram-intake.json"))
 EMAIL_PROCESSING_LEASE_SECONDS = int(os.getenv("TRIPY_EMAIL_PROCESSING_LEASE_SECONDS", "900"))
+TELEGRAM_STARTUP_RETRIES = max(1, int(os.getenv("TRIPY_TELEGRAM_STARTUP_RETRIES", "3")))
+TELEGRAM_RETRY_DELAY_SECONDS = max(0, float(os.getenv("TRIPY_TELEGRAM_RETRY_DELAY_SECONDS", "5")))
 MAX_PROCESSING_STAGE = 64
 MAX_PROCESSING_ERROR = 256
 MAX_STAGE_HISTORY = 12
+MAX_DOCUMENT_SIZE = int(os.getenv("TRIPY_MAX_DOCUMENT_SIZE", str(10 * 1024 * 1024)))
+MAX_UPLOAD_REQUEST_SIZE = MAX_DOCUMENT_SIZE + (1024 * 1024)
+MAX_EMAIL_SIZE = 30 * 1024 * 1024
 OFFSET = 0
 LOCK = threading.Lock()
+TELEGRAM_STATE_LOCK = threading.Lock()
+TELEGRAM_STATE = {"status": "disabled", "attempts": 0, "last_error": None, "last_success_at": None}
+HTTP_READY = False
+EMAIL_READY = False
 
 ICONS = {"טיסה": "✈️", "רכבת": "🚆", "מלון": "🏨", "אטרקציה": "🎟️", "מסעדה": "🍽️"}
 
@@ -61,6 +72,54 @@ def document_content_type(path):
     return known.get(suffix, "application/octet-stream")
 
 
+def safe_document_filename(value, fallback="document.bin"):
+    name = Path(str(value or fallback)).name
+    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    return name[:180] or fallback
+
+
+def resolve_document_path(root, requested):
+    root = Path(root).resolve()
+    requested = str(requested or "")
+    if not requested or Path(requested).name != requested:
+        return None
+    candidate = (root / requested).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
+
+def bounded_document_bytes(value, max_size=MAX_DOCUMENT_SIZE):
+    if len(value) > max_size:
+        raise ValueError("document_too_large")
+    return value
+
+
+def read_bounded_stream(stream, max_size=MAX_DOCUMENT_SIZE):
+    chunks = []
+    total = 0
+    while True:
+        chunk = stream.read(min(64 * 1024, max_size - total + 1))
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise ValueError("document_too_large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def read_bounded_file(path, max_size=MAX_DOCUMENT_SIZE):
+    with Path(path).open("rb") as stream:
+        return read_bounded_stream(stream, max_size=max_size)
+
+
+def is_supported_upload_filename(filename):
+    return Path(str(filename or "")).suffix.lower() in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}
+
+
 def waze_destination(name, address):
     """Return an address only when it is present and not name-only."""
     destination = str(address or "").replace("&amp;", "&").strip()
@@ -68,6 +127,30 @@ def waze_destination(name, address):
     if not destination or (label and destination.casefold() == label):
         return ""
     return destination
+
+
+def api_requires_auth(path):
+    """Protect API data and mutations while leaving public rates available."""
+    return path.startswith("/api/") and path != "/api/rates"
+
+
+def api_request_authorized(headers):
+    """Allow all API requests only when local fallback is explicitly active."""
+    if not API_AUTH_TOKEN:
+        return True
+    authorization = str(headers.get("Authorization", ""))
+    supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+    supplied = supplied or str(headers.get("X-TRIPY-API-TOKEN", ""))
+    return hmac.compare_digest(supplied, API_AUTH_TOKEN)
+
+
+def cors_origin(origin):
+    """Return the permitted CORS origin; wildcard is local-only fallback."""
+    if not API_AUTH_TOKEN:
+        return "*"
+    if origin and API_ALLOWED_ORIGIN and hmac.compare_digest(origin, API_ALLOWED_ORIGIN):
+        return origin
+    return None
 
 def load_events():
     if not DATA.exists(): return []
@@ -173,6 +256,7 @@ def safe_email_filename(value, fallback):
 
 def store_incoming_email(raw):
     if not raw: raise ValueError("empty_email")
+    if len(raw) > MAX_EMAIL_SIZE: raise ValueError("email_too_large")
     digest = hashlib.sha256(raw).hexdigest()
     message = BytesParser(policy=policy.default).parsebytes(raw)
     message_id = str(message.get("Message-ID") or "").strip()
@@ -193,6 +277,7 @@ def store_incoming_email(raw):
             disposition = part.get_content_disposition()
             filename = part.get_filename()
             if disposition == "attachment" or filename:
+                bounded_document_bytes(content)
                 stored_name = safe_email_filename(decode_email_header(filename), "attachment.bin")
                 target = folder / (f"{len(attachments)+1}_" + stored_name)
                 target.write_bytes(content)
@@ -901,7 +986,7 @@ def send(chat_id, text):
 def download_telegram_file(file_path):
     download_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
     with urllib.request.urlopen(download_url, timeout=60) as response:
-        return response.read()
+        return read_bounded_stream(response)
 
 def add_event(title, details, kind, source="Telegram", event_time=None):
     events = load_events()
@@ -1083,7 +1168,7 @@ def handle_message(message):
             name = filename_for_mime(name, declared_mime, remote_name)
             local = UPLOADS / (datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S_") + Path(name).name)
             update_telegram_intake(intake_id, filename=name, remote_path=file_info.get("file_path", ""), stage="download")
-            local.write_bytes(download_telegram_file(file_info["file_path"]))
+            local.write_bytes(bounded_document_bytes(download_telegram_file(file_info["file_path"])))
             update_telegram_intake(intake_id, local_filename=local.name, stage="extract")
             record["local_filename"] = local.name
             record["stage"] = "extract"
@@ -1131,6 +1216,41 @@ def handle_message(message):
     add_event(title, "נוסף מהבוט · " + (text[:180]), kind)
     send(chat, f"נוסף ל-TRIPY ✅\n{title}")
 
+def _safe_telegram_error(exc):
+    message = f"{type(exc).__name__}: {exc}"
+    return message.replace(TOKEN, "[redacted]") if TOKEN else message
+
+
+def telegram_status():
+    with TELEGRAM_STATE_LOCK:
+        return dict(TELEGRAM_STATE)
+
+
+def _set_telegram_status(**changes):
+    with TELEGRAM_STATE_LOCK:
+        TELEGRAM_STATE.update(changes)
+
+
+def start_telegram_polling():
+    """Start Telegram independently; never block HTTP/email startup."""
+    if not TOKEN:
+        _set_telegram_status(status="disabled", attempts=0, last_error=None)
+        return
+    for attempt in range(1, TELEGRAM_STARTUP_RETRIES + 1):
+        _set_telegram_status(status="starting", attempts=attempt)
+        try:
+            api("deleteWebhook")
+            _set_telegram_status(status="polling", last_error=None, last_success_at=datetime.now(timezone.utc).isoformat())
+            poll()
+            _set_telegram_status(status="stopped")
+            return
+        except Exception as exc:
+            _set_telegram_status(status="unavailable", last_error=_safe_telegram_error(exc))
+            if attempt < TELEGRAM_STARTUP_RETRIES:
+                time.sleep(TELEGRAM_RETRY_DELAY_SECONDS)
+    print("Telegram startup unavailable; HTTP/email remain available", flush=True)
+
+
 def poll():
     global OFFSET
     if not TOKEN: raise SystemExit("Missing TELEGRAM_BOT_TOKEN")
@@ -1141,17 +1261,41 @@ def poll():
                 OFFSET = update["update_id"] + 1
                 if update.get("message"): handle_message(update["message"])
         except Exception as exc:
-            print("Telegram polling error:", exc, flush=True)
+            _set_telegram_status(status="degraded", last_error=_safe_telegram_error(exc))
+            print("Telegram polling error:", _safe_telegram_error(exc), flush=True)
             time.sleep(5)
 
 class Handler(BaseHTTPRequestHandler):
     def _json(self, status, payload):
         raw = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status); self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
-    def do_OPTIONS(self): self.send_response(204); self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS"); self.send_header("Access-Control-Allow-Headers", "Content-Type"); self.end_headers()
+        origin = cors_origin(self.headers.get("Origin", ""))
+        if origin: self.send_header("Access-Control-Allow-Origin", origin)
+        if API_AUTH_TOKEN and origin: self.send_header("Access-Control-Allow-Credentials", "true")
+        if origin and origin != "*": self.send_header("Vary", "Origin")
+        self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+    def _authorized(self, path):
+        if api_requires_auth(path) and not api_request_authorized(self.headers):
+            self._json(401, {"error": "unauthorized"})
+            return False
+        return True
+    def do_OPTIONS(self):
+        origin = cors_origin(self.headers.get("Origin", ""))
+        self.send_response(204)
+        if origin: self.send_header("Access-Control-Allow-Origin", origin)
+        if API_AUTH_TOKEN and origin: self.send_header("Access-Control-Allow-Credentials", "true")
+        if origin and origin != "*": self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-TRIPY-API-TOKEN")
+        self.end_headers()
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if not self._authorized(path): return
+        if path in ("/health", "/healthz"):
+            self._json(200, {"status": "ok", "service": "trypy"}); return
+        if path in ("/ready", "/readyz"):
+            ready = HTTP_READY and EMAIL_READY
+            self._json(200 if ready else 503, {"status": "ready" if ready else "starting", "http": HTTP_READY, "email": EMAIL_READY, "telegram": telegram_status()}); return
         if path == "/api/rates":
             try:
                 request = urllib.request.Request("https://api.frankfurter.dev/v2/rates?base=ILS&quotes=USD,GBP,EUR,CHF,CAD,AUD,JPY,HUF,INR", headers={"Accept":"application/json", "User-Agent":"TRIPY/1.0"})
@@ -1170,13 +1314,16 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/intake/telegram":
             self._json(200, {"intake": load_telegram_intake()}); return
         if path.startswith("/api/documents/"):
-            filename = Path(urllib.parse.unquote(path[len("/api/documents/"):])).name
-            file_path = UPLOADS / filename
-            if not file_path.exists():
-                candidates = sorted(UPLOADS.glob("*_" + filename), key=lambda p: p.stat().st_mtime, reverse=True)
+            requested = urllib.parse.unquote(path[len("/api/documents/"):])
+            filename = safe_document_filename(requested)
+            file_path = resolve_document_path(UPLOADS, requested)
+            if file_path is None or not file_path.exists():
+                candidates = sorted((candidate for candidate in UPLOADS.glob("*_" + filename) if resolve_document_path(UPLOADS, candidate.name) == candidate.resolve()), key=lambda p: p.stat().st_mtime, reverse=True)
                 file_path = candidates[0] if candidates else file_path
-            if file_path.exists() and file_path.is_file():
-                raw = file_path.read_bytes(); self.send_response(200); self.send_header("Content-Type", document_content_type(file_path)); self.send_header("Content-Disposition", "inline; filename*=UTF-8''" + urllib.parse.quote(filename)); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
+            if file_path and file_path.exists() and file_path.is_file():
+                if file_path.stat().st_size > MAX_DOCUMENT_SIZE:
+                    self._json(413, {"error": "document_too_large"}); return
+                raw = read_bounded_file(file_path); self.send_response(200); self.send_header("Content-Type", document_content_type(file_path)); self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Content-Disposition", "inline; filename*=UTF-8''" + urllib.parse.quote(filename)); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
             self._json(404, {"error": "document_not_found"}); return
         if path in ("/", "/index.html"):
             raw = (ROOT / "index.html").read_bytes(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
@@ -1187,6 +1334,8 @@ class Handler(BaseHTTPRequestHandler):
                 raw = file_path.read_bytes(); self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         self._json(404, {"error": "not_found"})
     def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        if not self._authorized(path): return
         if self.path == "/api/intake/email":
             if not EMAIL_INTAKE_SECRET:
                 self._json(503, {"error": "email_intake_not_configured"}); return
@@ -1195,7 +1344,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(401, {"error": "unauthorized"}); return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
-                if length <= 0 or length > 30 * 1024 * 1024:
+                if length <= 0 or length > MAX_EMAIL_SIZE:
                     self._json(413, {"error": "email_size_invalid"}); return
                 raw = self.rfile.read(length)
                 record, duplicate = store_incoming_email(raw)
@@ -1206,13 +1355,17 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "invalid_email"}); return
         if self.path == "/api/upload":
             try:
-                length = int(self.headers.get("Content-Length", "0")); body = self.rfile.read(length)
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > MAX_UPLOAD_REQUEST_SIZE:
+                    self._json(413, {"error": "upload_size_invalid"}); return
+                body = self.rfile.read(length)
                 filename, file_bytes = parse_upload_multipart(body, self.headers.get("Content-Type", ""))
                 if not filename:
                     self._json(400, {"error":"file_required"}); return
-                filename = Path(filename).name
-                if Path(filename).suffix.lower() not in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}:
+                filename = safe_document_filename(filename)
+                if not is_supported_upload_filename(filename):
                     self._json(400, {"error":"unsupported_file_type"}); return
+                bounded_document_bytes(file_bytes)
                 UPLOADS.mkdir(parents=True, exist_ok=True)
                 stored = f"{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}_{filename}"
                 path = UPLOADS / stored; path.write_bytes(file_bytes)
@@ -1257,6 +1410,8 @@ class Handler(BaseHTTPRequestHandler):
             trips = load_trips(); trips.insert(0, trip); save_trips(trips); self._json(201, {"trip": trip})
         except (ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error": "invalid_json"})
     def do_PATCH(self):
+        path = self.path.split("?", 1)[0]
+        if not self._authorized(path): return
         prefix = "/api/trips/"
         if not self.path.startswith(prefix): self._json(404, {"error": "not_found"}); return
         try:
@@ -1271,6 +1426,8 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error": "invalid_json"})
 
     def do_DELETE(self):
+        path = self.path.split("?", 1)[0]
+        if not self._authorized(path): return
         if self.path.startswith("/api/events/"):
             try:
                 index = int(urllib.parse.unquote(self.path[len("/api/events/"):]))
@@ -1284,11 +1441,13 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"trips": delete_trip(self.path[len(prefix):])})
 
 def main():
-    if not TOKEN: raise SystemExit("Set TELEGRAM_BOT_TOKEN before starting TRIPY bot")
-    api("deleteWebhook")
-    threading.Thread(target=poll, daemon=True).start()
+    global HTTP_READY, EMAIL_READY
+    httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    HTTP_READY = True
+    EMAIL_READY = bool(EMAIL_INTAKE_SECRET)
     resume_pending_email_processing()
+    threading.Thread(target=start_telegram_polling, daemon=True).start()
     print(f"TRIPY bot/API listening on http://127.0.0.1:{PORT}", flush=True)
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    httpd.serve_forever()
 
 if __name__ == "__main__": main()
