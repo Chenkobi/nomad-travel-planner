@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from email import policy
 from email.header import decode_header, make_header
 from email.parser import BytesParser
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -143,12 +144,57 @@ def email_attachment_candidates(record):
     folder = email_record_folder(record)
     candidates = []
     for attachment in record.get("attachments", []):
-        if attachment.get("content_type") not in supported:
+        suffix = Path(str(attachment.get("filename") or "")).suffix.lower()
+        if attachment.get("content_type") not in supported and suffix not in {".pdf", ".jpg", ".jpeg", ".png", ".webp"}:
             continue
         source = folder / str(attachment.get("path") or "")
         if source.is_file():
             candidates.append((source, attachment))
     return candidates
+
+
+class _EmailHTMLText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() in {"script", "style", "head", "svg"}:
+            self.skip_depth += 1
+        elif self.skip_depth == 0 and tag.lower() in {"br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "section"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag.lower() in {"script", "style", "head", "svg"} and self.skip_depth:
+            self.skip_depth -= 1
+        elif self.skip_depth == 0 and tag.lower() in {"p", "div", "li", "tr", "h1", "h2", "h3", "h4", "section"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if self.skip_depth == 0:
+            self.parts.append(data)
+
+
+def html_to_text(value):
+    parser = _EmailHTMLText()
+    try:
+        parser.feed(str(value or ""))
+        parser.close()
+    except (TypeError, ValueError):
+        return ""
+    return re.sub(r"[ \t]+", " ", re.sub(r"\n{3,}", "\n\n", "".join(parser.parts))).strip()
+
+
+def email_body_text(record):
+    folder = email_record_folder(record)
+    text_path = folder / "body.txt"
+    text = text_path.read_text(encoding="utf-8", errors="replace") if text_path.is_file() else ""
+    if text.strip():
+        return text
+    html_path = folder / "body.html"
+    html = html_path.read_text(encoding="utf-8", errors="replace") if html_path.is_file() else ""
+    return html_to_text(html)
 
 
 def prepare_email_source(record):
@@ -159,8 +205,11 @@ def prepare_email_source(record):
     else:
         source = email_record_folder(record) / "body.txt"
         filename = f"email-{record.get('id', 'message')}.txt"
-        if not source.is_file() or not source.read_text(encoding="utf-8", errors="replace").strip():
+        body = email_body_text(record)
+        if not body:
             return None
+        if not source.is_file() or source.read_text(encoding="utf-8", errors="replace") != body:
+            source.write_text(body, encoding="utf-8")
     UPLOADS.mkdir(parents=True, exist_ok=True)
     stored = f"email_{record.get('id', 'message')}_{filename}"
     target = UPLOADS / stored
@@ -206,6 +255,26 @@ def decorate_trip_booking(trip, ai, filename, intake_id):
     return changed
 
 
+def dated_trip_target(trips, date_value):
+    date_value = str(date_value or "").strip()
+    if not date_value:
+        return None
+    return next((trip for trip in trips if str(trip.get("start") or "") <= date_value <= str(trip.get("end") or "")), None)
+
+
+def create_dated_trip_shell(trips, start, end, source, filename, title="טיול חדש"):
+    start, end = str(start or "").strip(), str(end or start or "").strip()
+    if not start or not end:
+        raise ValueError("booking has no usable dates")
+    try:
+        days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
+    except ValueError as exc:
+        raise ValueError("booking dates are not ISO dates") from exc
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title or "טיול חדש", "start": start, "end": end, "days": days, "source": source, "document": filename, "documents": [filename], "image": "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80", "images": ["https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"], "destinations": [], "hotels": [], "flights": [], "trains": [], "attractions": [], "rentals": [], "restaurants": [], "document_titles": {filename: "אישור הזמנה"}}
+    trips.append(trip)
+    return trip
+
+
 def apply_email_cancellation(ai, record):
     trips = load_trips()
     matches = find_booking_matches(trips, lifecycle_facts(ai))
@@ -223,7 +292,7 @@ def process_incoming_email(record):
     update_email_record(intake_id, status="processing", processing_started_at=datetime.now(timezone.utc).isoformat())
     subject = str(record.get("subject") or "")
     body_path = email_record_folder(record) / "body.txt"
-    body = body_path.read_text(encoding="utf-8", errors="replace") if body_path.is_file() else ""
+    body = email_body_text(record)
     intent = classify_email_intent(subject, body)
     if not looks_like_travel_email(subject, body):
         update_email_record(intake_id, status="ignored", intent="unknown", processed_at=datetime.now(timezone.utc).isoformat())
@@ -401,25 +470,27 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         if not departure or not arrival or not all(required):
             raise ValueError("flight document missing unambiguous flight facts")
         trips = load_trips()
-        target = next((t for t in trips if t.get("start") <= departure <= t.get("end")), None)
+        target = dated_trip_target(trips, departure)
         event = [str(ai.get("departure_time")), "✈️", f"טיסה {ai.get('airline')} {ai.get('flight_number')}", f"{ai.get('origin')} → {ai.get('destination')} · יציאה {ai.get('departure_time')} · הגעה {ai.get('arrival_time')}", "טיסה", source, departure]
-        if target:
-            target.setdefault("flights", []).append({"airline":ai.get("airline"),"number":ai.get("flight_number"),"origin":ai.get("origin"),"destination":ai.get("destination"),"departure_date":departure,"departure_time":ai.get("departure_time"),"arrival_date":arrival,"arrival_time":ai.get("arrival_time"),"document":filename})
-            target["flights"] = list({json.dumps(f, sort_keys=True, ensure_ascii=False): f for f in target["flights"]}.values())
-            target.setdefault("documents", []).append(filename)
-            target["documents"] = list(dict.fromkeys(target["documents"]))
-            target.setdefault("document_titles", {})[filename] = f"כרטיס טיסה · {ai.get('airline')} {ai.get('flight_number')}"
-            save_trips(trips)
-            events = load_events()
-            if not any(len(e) > 6 and e[2] == event[2] and e[6] == departure for e in events):
-                events.insert(0, event); save_events(events)
-            return {**target, "_ingested_type": "flight"}
-        raise ValueError("flight has no existing dated trip to attach to")
+        if not target:
+            target = create_dated_trip_shell(trips, departure, arrival, source, filename, f"טיול · {ai.get('destination')}")
+        target.setdefault("flights", []).append({"airline":ai.get("airline"),"number":ai.get("flight_number"),"origin":ai.get("origin"),"destination":ai.get("destination"),"departure_date":departure,"departure_time":ai.get("departure_time"),"arrival_date":arrival,"arrival_time":ai.get("arrival_time"),"document":filename})
+        target["flights"] = list({json.dumps(f, sort_keys=True, ensure_ascii=False): f for f in target["flights"]}.values())
+        target.setdefault("documents", []).append(filename)
+        target["documents"] = list(dict.fromkeys(target["documents"]))
+        target.setdefault("document_titles", {})[filename] = f"כרטיס טיסה · {ai.get('airline')} {ai.get('flight_number')}"
+        save_trips(trips)
+        events = load_events()
+        if not any(len(e) > 6 and e[2] == event[2] and e[6] == departure for e in events):
+            events.insert(0, event); save_events(events)
+        return {**target, "_ingested_type": "flight"}
     if doc_type == "insurance":
         trips = load_trips()
         policy_start = str(ai.get("valid_from") or ai.get("check_in") or ai.get("departure_date") or "").strip(); policy_end = str(ai.get("valid_to") or ai.get("check_out") or ai.get("arrival_date") or "").strip()
-        candidates = [t for t in trips if policy_start and t.get("start") <= policy_start <= t.get("end")]
-        target = candidates[0] if len(candidates) == 1 else (trips[0] if len(trips) == 1 else None)
+        target = dated_trip_target(trips, policy_start)
+        if not target and policy_start:
+            target = create_dated_trip_shell(trips, policy_start, policy_end or policy_start, source, filename, "טיול חדש · ביטוח")
+        if not target and len(trips) == 1: target = trips[0]
         if not target: raise ValueError("insurance cannot be assigned to one dated trip")
         insurance = normalize_insurance(ai)
         insurance["document"] = filename
@@ -431,8 +502,8 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         date = str(ai.get("date") or "").strip(); time_value = str(ai.get("time") or "").strip(); name = str(ai.get("restaurant_name") or ai.get("name") or "").strip()
         location = str(ai.get("address") or ai.get("location") or "").strip(); phone = str(ai.get("phone") or "").strip()
         if not all((date, time_value, name)): raise ValueError("restaurant reservation missing name, date, or time")
-        trips = load_trips(); target = next((t for t in trips if t.get("start") <= date <= t.get("end")), None)
-        if not target: raise ValueError("restaurant reservation has no existing dated trip to attach to")
+        trips = load_trips(); target = dated_trip_target(trips, date)
+        if not target: target = create_dated_trip_shell(trips, date, date, source, filename, f"טיול · {location or name}")
         record = {"name": name, "date": date, "time": time_value, "address": location, "location": location, "phone": phone, "supplier": str(ai.get("supplier") or "").strip(), "confirmation_number": str(ai.get("confirmation_number") or "").strip(), "document": filename, "status": "confirmed"}
         target.setdefault("restaurants", []).append(record); target["restaurants"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["restaurants"]}.values()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"הזמנת מסעדה · {name}"; save_trips(trips)
         events = load_events(); event = [time_value, "🍽️", name, location or "הזמנת מסעדה", "מסעדה", source, date, location]
@@ -441,8 +512,8 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
     if doc_type == "car_rental":
         pickup_date = str(ai.get("pickup_date") or "").strip(); pickup_time = str(ai.get("pickup_time") or "").strip(); pickup_location = str(ai.get("pickup_location") or "").strip(); vehicle_type = str(ai.get("vehicle_type") or "").strip()
         if not all((pickup_date, pickup_time, pickup_location, vehicle_type)): raise ValueError("car rental missing pickup location, time, date, or vehicle type")
-        trips = load_trips(); target = next((t for t in trips if t.get("start") <= pickup_date <= t.get("end")), None)
-        if not target: raise ValueError("car rental has no existing dated trip to attach to")
+        trips = load_trips(); target = dated_trip_target(trips, pickup_date)
+        if not target: target = create_dated_trip_shell(trips, pickup_date, str(ai.get("dropoff_date") or pickup_date).strip(), source, filename, f"טיול · {pickup_location}")
         record = {"pickup_date":pickup_date,"pickup_time":pickup_time,"pickup_location":pickup_location,"vehicle_type":vehicle_type,"dropoff_date":str(ai.get("dropoff_date") or "").strip(),"dropoff_time":str(ai.get("dropoff_time") or "").strip(),"dropoff_location":str(ai.get("dropoff_location") or "").strip(),"document":filename}
         target.setdefault("rentals", []).append(record); target["rentals"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["rentals"]}.values()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"השכרת רכב · {vehicle_type}"; save_trips(trips)
         events = load_events(); title = f"איסוף רכב · {vehicle_type}"; details = f"{pickup_location} · שעה {pickup_time}"; event = [pickup_time, "🚗", title, details, "רכב", source, pickup_date, pickup_location]
@@ -460,8 +531,8 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
             facts = extract_attraction_facts(text, ai); date = facts["date"]; time_value = facts["time"]; name = facts["name"]; location = facts["location"]
             if not all((date, time_value, name, location)): raise ValueError("attraction document missing unambiguous facts")
             title = name; details = location; record = {"name":name,"location":location,"date":date,"time":time_value,"document":filename}; kind = "אטרקציה"; icon = "🎟️"
-        trips = load_trips(); target = next((t for t in trips if t.get("start") <= date <= t.get("end")), None)
-        if not target: raise ValueError(f"{doc_type} has no existing dated trip to attach to")
+        trips = load_trips(); target = dated_trip_target(trips, date)
+        if not target: target = create_dated_trip_shell(trips, date, date, source, filename, f"טיול · {name}")
         key = "trains" if doc_type == "train" else "attractions"; target.setdefault(key, []).append(record); target[key] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target[key]}.values()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = ((f"כרטיס רכבת · {name}") if doc_type == "train" else f"אטרקציה · {name}"); save_trips(trips)
         events = load_events(); event = [time_value, icon, title, details, kind, source, date, record.get("location", "")]
         if not any(len(e) > 6 and e[2] == title and e[6] == date for e in events): events.insert(0, event); save_events(events)
