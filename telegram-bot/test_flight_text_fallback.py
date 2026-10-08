@@ -59,6 +59,14 @@ class FlightTextFallbackTests(unittest.TestCase):
         self.assertEqual(result["departure_time"], "08:30")
         self.assertEqual(result["arrival_time"], "11:30")
 
+    def test_hotel_context_overrides_contradictory_restaurant_label(self):
+        result = server.infer_document_type(
+            {"type": "restaurant"},
+            "Your reservation confirmation and check-in details",
+            "voco hotel reservation confirmation",
+        )
+        self.assertEqual(result, "hotel")
+
     def test_sender_context_classifies_rental_when_document_text_is_sparse(self):
         result = server.infer_document_type({}, "Pickup date and drop-off date", "Avis booking confirmation")
         self.assertEqual(result, "car_rental")

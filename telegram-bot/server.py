@@ -1108,6 +1108,12 @@ def infer_document_type(ai, text="", context=""):
     normalized = str(text or "").lower()
     context_normalized = str(context or "").lower()
     combined = "\n".join(value for value in (normalized, context_normalized) if value)
+    hotel_markers = ("hotel", "resort", "check-in", "check in", "check-out", "check out", "room", "accommodation", "voco", "ibis", "emerald")
+    restaurant_markers = ("restaurant", "dinner", "lunch", "table reservation", "מסעדה", "הזמנת שולחן")
+    hotel_score = sum(1 for marker in hotel_markers if marker in combined)
+    restaurant_score = sum(1 for marker in restaurant_markers if marker in combined)
+    if doc_type == "restaurant" and hotel_score >= 2 and restaurant_score == 0:
+        return "hotel"
     extended = infer_extended_type(ai, combined)
     if extended: return extended
     attraction_markers = ("museum", "chocolate museum", "lindt home of chocolate", "single ticket", "admission", "ticket", "guided tour", "visit", "directions", "kilchberg", "attraction")
