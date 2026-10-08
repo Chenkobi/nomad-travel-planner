@@ -22,7 +22,18 @@ CAR_RENTAL_PROVIDER_MARKERS = (
     "budget rent a car",
     "europcar",
     "alamo",
+    "autoeurope",
+    "auto europe",
     "כרטיס השכרת רכב",
+)
+
+TRAIN_MARKERS = (
+    "deutsche bahn",
+    "db bahn",
+    "train booking",
+    "train ticket",
+    "rail ticket",
+    "רכבת",
 )
 
 CAR_RENTAL_FACT_MARKERS = (
@@ -60,6 +71,8 @@ def infer_extended_type(ai: dict[str, Any] | None, text: str = "") -> str | None
         return "restaurant"
     if any(marker in lowered for marker in INSURANCE_MARKERS):
         return "insurance"
+    if any(marker in lowered for marker in TRAIN_MARKERS):
+        return "train"
     if any(provider in lowered for provider in CAR_RENTAL_PROVIDER_MARKERS) and any(marker in lowered for marker in CAR_RENTAL_FACT_MARKERS):
         return "car_rental"
     if any(marker in lowered for marker in CAR_RENTAL_FACT_MARKERS):

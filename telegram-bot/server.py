@@ -659,6 +659,40 @@ def normalize_flight_fields(ai, text=""):
     return result
 
 
+def normalize_car_rental_fields(ai, text=""):
+    """Normalize explicit rental facts from model output and source labels."""
+    result = dict(ai or {})
+    source = str(text or "").replace("\u00a0", " ")
+
+    def set_field(key, labels, normalizer=lambda value: value.strip()):
+        if str(result.get(key) or "").strip():
+            return
+        values = _label_values(source, labels)
+        if len(values) == 1:
+            result[key] = normalizer(values[0])
+
+    set_field("pickup_date", ("pickup date", "pick-up date", "collection date", "תאריך איסוף"), lambda value: normalize_date_value(value) or value.strip())
+    set_field("dropoff_date", ("dropoff date", "drop-off date", "return date", "תאריך החזרה"), lambda value: normalize_date_value(value) or value.strip())
+    set_field("pickup_time", ("pickup time", "pick-up time", "collection time", "שעת איסוף"), lambda value: value.strip().zfill(5))
+    set_field("dropoff_time", ("dropoff time", "drop-off time", "return time", "שעת החזרה"), lambda value: value.strip().zfill(5))
+    set_field("pickup_location", ("pickup location", "pick-up location", "collection location", "איסוף רכב"))
+    set_field("dropoff_location", ("dropoff location", "drop-off location", "return location", "החזרת רכב"))
+    set_field("vehicle_type", ("vehicle type", "car type", "rental car", "סוג רכב"))
+
+    dates = [_normalize_explicit_date(value) for value in _explicit_date_tokens(source)]
+    dates = [value for value in dates if value]
+    if not result.get("pickup_date") and dates:
+        result["pickup_date"] = dates[0]
+    if not result.get("dropoff_date") and len(dates) >= 2:
+        result["dropoff_date"] = dates[1]
+    times = re.findall(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b", source)
+    if not result.get("pickup_time") and times:
+        result["pickup_time"] = times[0].zfill(5)
+    if not result.get("dropoff_time") and len(times) >= 2:
+        result["dropoff_time"] = times[1].zfill(5)
+    return result
+
+
 def normalize_flight_segments(ai, text=""):
     """Return explicit flight segments separately; never collapse conflicting segments."""
     supplied = (ai or {}).get("segments") if isinstance(ai, dict) else None
@@ -1201,6 +1235,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         if not any(len(e) > 6 and e[2] == name and e[6] == date for e in events): events.insert(0, event); save_events(events)
         return {**target, "_ingested_type": "restaurant"}
     if doc_type == "car_rental":
+        ai = normalize_car_rental_fields(ai, text)
         pickup_date = str(ai.get("pickup_date") or "").strip(); pickup_time = str(ai.get("pickup_time") or "").strip(); pickup_location = str(ai.get("pickup_location") or "").strip(); vehicle_type = str(ai.get("vehicle_type") or "").strip()
         pickup_date = normalize_date_value(pickup_date) or pickup_date
         dropoff_date = normalize_date_value(str(ai.get("dropoff_date") or "").strip()) or str(ai.get("dropoff_date") or "").strip()
@@ -1217,7 +1252,11 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         return {**target, "_ingested_type": "car_rental"}
     if doc_type in ("train", "attraction"):
         if doc_type == "train":
-            date = str(ai.get("departure_date") or "").strip(); time_value = str(ai.get("departure_time") or "").strip(); name = str(ai.get("train_number") or "").strip(); origin = str(ai.get("origin") or "").strip(); destination = str(ai.get("destination") or "").strip()
+            date = normalize_date_value(str(ai.get("departure_date") or "").strip()) or str(ai.get("departure_date") or "").strip()
+            time_value = str(ai.get("departure_time") or "").strip()
+            if re.fullmatch(r"\d{1,2}:\d{2}", time_value):
+                time_value = time_value.zfill(5)
+            name = str(ai.get("train_number") or "").strip(); origin = str(ai.get("origin") or "").strip(); destination = str(ai.get("destination") or "").strip()
             if not all((date, time_value, name, origin, destination)): raise ValueError("train document missing unambiguous facts")
             title = f"רכבת {name}"; details = f"{origin} → {destination}"; record = {"number":name,"origin":origin,"destination":destination,"date":date,"time":time_value,"document":filename}; kind = "רכבת"; icon = "🚆"
         else:

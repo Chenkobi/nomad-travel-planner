@@ -77,6 +77,70 @@ class FutureBookingTests(unittest.TestCase):
             finally:
                 server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
 
+    def test_auto_europe_text_fallback_fills_rental_fields(self):
+        text = """Auto Europe voucher
+Pick-up date: October 24, 2026
+Pick-up time: 10:00
+Pick-up location: Milan Airport Malpensa T1
+Vehicle type: Compact
+Drop-off date: October 27, 2026
+Drop-off time: 10:00
+Drop-off location: Milan Airport Malpensa T1"""
+        result = server.normalize_car_rental_fields({}, text)
+        self.assertEqual(result["pickup_date"], "2026-10-24")
+        self.assertEqual(result["pickup_time"], "10:00")
+        self.assertEqual(result["pickup_location"], "Milan Airport Malpensa T1")
+        self.assertEqual(result["vehicle_type"], "Compact")
+        self.assertEqual(result["dropoff_date"], "2026-10-27")
+        self.assertEqual(result["dropoff_location"], "Milan Airport Malpensa T1")
+    def test_create_car_rental_uses_source_fallback_when_ai_fields_are_missing(self):
+        with TemporaryDirectory() as tmp:
+            old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                root = Path(tmp)
+                server.DATA = root / "events.json"
+                server.TRIPS = root / "trips.json"
+                server.UPLOADS = root / "uploads"
+                server.save_trips([])
+                path = root / "autoeurope.txt"
+                path.write_text("""Auto Europe voucher
+Pick-up date: October 24, 2026
+Pick-up time: 10:00
+Pick-up location: Milan Airport Malpensa T1
+Vehicle type: Compact
+Drop-off date: October 27, 2026
+Drop-off time: 10:00
+Drop-off location: Milan Airport Malpensa T1""", encoding="utf-8")
+                trip = server.create_trip_from_document(
+                    "autoeurope.txt", path, source="Email", ai_override={
+                        "type": "car_rental", "status": "confirmed",
+                    })
+                self.assertEqual(trip["rentals"][0]["pickup_date"], "2026-10-24")
+                self.assertEqual(trip["rentals"][0]["pickup_location"], "Milan Airport Malpensa T1")
+                self.assertEqual(trip["rentals"][0]["vehicle_type"], "Compact")
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
+    def test_train_month_name_dates_are_normalized_before_persistence(self):
+        with TemporaryDirectory() as tmp:
+            old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                root = Path(tmp)
+                server.DATA = root / "events.json"
+                server.TRIPS = root / "trips.json"
+                server.UPLOADS = root / "uploads"
+                server.save_trips([])
+                server.save_events([])
+                path = root / "bahn.txt"
+                path.write_text("Deutsche Bahn Berlin to Munich", encoding="utf-8")
+                trip = server.create_trip_from_document(
+                    "bahn.txt", path, source="Email", ai_override={
+                        "type": "train", "status": "confirmed", "train_number": "ICE 701",
+                        "origin": "Berlin", "destination": "Munich",
+                        "departure_date": "October 24, 2026", "departure_time": "08:10",
+                    })
+                self.assertEqual(trip["trains"][0]["date"], "2026-10-24")
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
     def test_insurance_month_name_dates_are_normalized_before_routing(self):
         with TemporaryDirectory() as tmp:
             old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
