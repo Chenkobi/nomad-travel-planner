@@ -131,8 +131,8 @@ def waze_destination(name, address):
 
 
 def api_requires_auth(path):
-    """Protect API data and mutations while leaving public rates available."""
-    return path.startswith("/api/") and path != "/api/rates"
+    """Protect API data and mutations while leaving signed intake public."""
+    return path.startswith("/api/") and path not in ("/api/rates", "/api/intake/email")
 
 
 def api_request_authorized(headers):

@@ -53,6 +53,9 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(response.status, 401)
         self.assertEqual(json.loads(response.read()), {"error": "unauthorized"})
 
+    def test_email_intake_uses_its_dedicated_secret_boundary(self):
+        self.assertFalse(server.api_requires_auth("/api/intake/email"))
+
     def test_authorized_sensitive_read_is_allowed(self):
         response = self.request("/api/trips", {"Authorization": "Bearer test-token"})
         self.assertEqual(response.status, 200)
