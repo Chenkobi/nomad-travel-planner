@@ -44,6 +44,8 @@ TELEGRAM_RETRY_DELAY_SECONDS = max(0, float(os.getenv("TRIPY_TELEGRAM_RETRY_DELA
 MAX_PROCESSING_STAGE = 64
 MAX_PROCESSING_ERROR = 256
 MAX_STAGE_HISTORY = 12
+MAX_EXTRACTION_ATTEMPTS = 8
+MAX_TELEMETRY_STRING = 180
 MAX_DOCUMENT_SIZE = int(os.getenv("TRIPY_MAX_DOCUMENT_SIZE", str(10 * 1024 * 1024)))
 MAX_UPLOAD_REQUEST_SIZE = MAX_DOCUMENT_SIZE + (1024 * 1024)
 MAX_EMAIL_SIZE = 30 * 1024 * 1024
@@ -323,6 +325,83 @@ def _redacted_error(error):
     return text[:MAX_PROCESSING_ERROR]
 
 
+_TELEMETRY_TYPES = {"hotel", "flight", "train", "attraction", "car_rental", "restaurant", "insurance", "other"}
+_TELEMETRY_STATUSES = {"confirmed", "modified", "cancelled", "refunded", "unknown"}
+_TELEMETRY_RECORD_STATUSES = {"processing", "processed", "needs_review", "ignored", "failed"}
+_TELEMETRY_SOURCE_KINDS = {"attachment", "email_body"}
+_TELEMETRY_OUTCOMES = {"success", "failure", "skipped"}
+_TELEMETRY_PERSISTENCE = {"created", "updated", "not_persisted", "failed", "ignored"}
+_TELEMETRY_ERROR_CODES = {
+    "", "source_unavailable", "provider_unavailable", "invalid_provider_response",
+    "unsupported_type", "unknown_status", "validation_failed", "persistence_failed",
+    "no_unique_match", "not_travel_email", "no_source",
+}
+
+
+def _bounded_telemetry_text(value):
+    return re.sub(r"[\x00-\x1f\x7f]", "", str(value or ""))[:MAX_TELEMETRY_STRING]
+
+
+def _telemetry_choice(value, allowed, fallback):
+    value = str(value or "").strip().lower()
+    return value if value in allowed else fallback
+
+
+def _telemetry_nonnegative_int(value):
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _telemetry_source_filename(value, source_kind):
+    suffix = Path(str(value or "")).suffix.lower()
+    allowed_suffixes = {".pdf", ".html", ".htm", ".txt", ".jpg", ".jpeg", ".png", ".webp"}
+    if suffix not in allowed_suffixes:
+        suffix = ".bin"
+    prefix = "attachment" if source_kind == "attachment" else "email-body"
+    return f"{prefix}{suffix}"
+
+
+def record_extraction_attempt(intake_id, *, source_filename="", source_kind="", mime_type="", byte_size=0,
+                              extracted_text_length=0, provider="gemini", model=None, outcome="failure",
+                              status="needs_review", retry_count=0, normalized_type="other",
+                              normalized_status="unknown", validation_error_code="",
+                              validation_error_field="", persistence_outcome="not_persisted"):
+    """Persist only bounded, allow-listed extraction telemetry; never provider payloads."""
+    source_kind = _telemetry_choice(source_kind, _TELEMETRY_SOURCE_KINDS, "email_body")
+    telemetry = {
+        "at": _utc_now().isoformat(),
+        "source_filename": _telemetry_source_filename(source_filename, source_kind),
+        "source_kind": source_kind,
+        "mime_type": _bounded_telemetry_text(mime_type).lower() or "application/octet-stream",
+        "byte_size": _telemetry_nonnegative_int(byte_size),
+        "extracted_text_length": _telemetry_nonnegative_int(extracted_text_length),
+        "provider": _bounded_telemetry_text(provider).lower() or "unknown",
+        "model": _bounded_telemetry_text(model or GEMINI_MODEL),
+        "outcome": _telemetry_choice(outcome, _TELEMETRY_OUTCOMES, "failure"),
+        "status": _telemetry_choice(status, _TELEMETRY_RECORD_STATUSES, "needs_review"),
+        "retry_count": _telemetry_nonnegative_int(retry_count),
+        "normalized_type": _telemetry_choice(normalized_type, _TELEMETRY_TYPES, "other"),
+        "normalized_status": _telemetry_choice(normalized_status, _TELEMETRY_STATUSES, "unknown"),
+        "validation_error_code": _telemetry_choice(validation_error_code, _TELEMETRY_ERROR_CODES, "validation_failed") if validation_error_code else "",
+        "validation_error_field": _bounded_telemetry_text(validation_error_field).lower(),
+        "persistence_outcome": _telemetry_choice(persistence_outcome, _TELEMETRY_PERSISTENCE, "failed"),
+    }
+    with LOCK:
+        items = load_email_index()
+        for record in items:
+            if record.get("id") != intake_id:
+                continue
+            history = list(record.get("extraction_telemetry") or [])
+            history.append(telemetry)
+            record["extraction_telemetry"] = history[-MAX_EXTRACTION_ATTEMPTS:]
+            record["updated_at"] = _utc_now().isoformat()
+            save_email_index(items)
+            return dict(record)
+    return None
+
+
 def claim_email_for_processing(intake_id, now=None, lease_seconds=None):
     """Atomically acquire a processing lease, recovering only stale workers."""
     now = now or _utc_now()
@@ -450,43 +529,142 @@ def normalize_date_value(value):
     return ""
 
 
+HEBREW_MONTHS = {
+    "ינואר": "January", "פברואר": "February", "מרץ": "March", "אפריל": "April",
+    "מאי": "May", "יוני": "June", "יולי": "July", "אוגוסט": "August",
+    "ספטמבר": "September", "אוקטובר": "October", "נובמבר": "November", "דצמבר": "December",
+}
+
+
+def _unique_values(values, normalizer=lambda value: value):
+    found = {}
+    for value in values:
+        value = str(value or "").strip()
+        if value:
+            found.setdefault(normalizer(value), value)
+    return list(found.values())
+
+
+def _label_values(source, labels):
+    pattern = r"(?im)^\s*(?:" + "|".join(labels) + r")\s*[:：-]\s*(.+?)\s*$"
+    return _unique_values((match.group(1) for match in re.finditer(pattern, source)))
+
+
+def _normalize_flight_number(value):
+    value = re.sub(r"\s+", " ", str(value or "").strip().upper())
+    compact = re.fullmatch(r"W6\s?(\d{4})", value)
+    if compact:
+        return f"W6 {compact.group(1)}"
+    return value
+
+
+def _explicit_date_tokens(source):
+    tokens = re.findall(r"\b(?:\d{4}-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{1,2},?\s+20\d{2}|\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+20\d{2})\b", source, re.I)
+    for hebrew, english in HEBREW_MONTHS.items():
+        tokens.extend(re.findall(rf"\b\d{{1,2}}\s+{hebrew}\s+20\d{{2}}\b", source))
+    return tokens
+
+
+def _normalize_explicit_date(value):
+    value = re.sub(r"\s+", " ", str(value or "").strip())
+    for hebrew, english in HEBREW_MONTHS.items():
+        value = re.sub(rf"(\d{{1,2}})\s+ב?{hebrew}\s+(20\d{{2}})", rf"\1 {english} \2", value)
+    return normalize_date_value(value)
+
+
 def normalize_flight_fields(ai, text=""):
-    """Fill only explicit flight facts from the provider result or source text."""
+    """Normalize one flight without selecting between conflicting explicit facts."""
     result = dict(ai or {})
     raw_source = str(text or "").replace("\u00a0", " ")
-    source = re.sub(r"\s+", " ", raw_source).strip()
+    lines = [line.strip() for line in raw_source.splitlines() if line.strip()]
+    deduped_lines = list(dict.fromkeys(re.sub(r"\s+", " ", line) for line in lines))
+    source = "\n".join(deduped_lines)
     lower = source.casefold()
 
+    def set_if_missing(key, values, normalizer=lambda value: value):
+        if str(result.get(key) or "").strip():
+            return
+        unique = _unique_values(values, normalizer)
+        if len(unique) == 1:
+            result[key] = normalizer(unique[0])
+
+    set_if_missing("airline", _label_values(source, ("airline", "carrier", "חברת תעופה")))
     if not str(result.get("airline") or "").strip():
-        for name in ("Arkia", "Wizz Air", "Wizz"):
-            if name.casefold() in lower:
-                result["airline"] = name
-                break
+        if "wizz air" in lower or re.search(r"\bwizz\b", lower):
+            result["airline"] = "Wizz Air"
+        elif "arkia" in lower:
+            result["airline"] = "Arkia"
+
+    set_if_missing("flight_number", _label_values(source, ("flight number", "flight no", "מספר טיסה")), _normalize_flight_number)
     if not str(result.get("flight_number") or "").strip():
-        match = re.search(r"\b([A-Z]{1,3}\s?\d{1,4})\b", source, re.I)
-        if match:
-            result["flight_number"] = re.sub(r"\s+", " ", match.group(1).upper()).strip()
-    if not str(result.get("origin") or "").strip() or not str(result.get("destination") or "").strip():
-        route = re.search(r"(?im)^\s*([A-Za-z][A-Za-z .'-]{1,30}?)\s+(?:to|→)\s+([A-Za-z][A-Za-z .'-]{1,30}?)(?:\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|\d{4}-))?\s*$", raw_source)
-        if route:
-            if not str(result.get("origin") or "").strip():
-                result["origin"] = route.group(1).strip()
-            if not str(result.get("destination") or "").strip():
-                result["destination"] = route.group(2).strip()
-    date_tokens = re.findall(r"\b(?:\d{4}-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{1,2},\s+20\d{2}|\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+20\d{2})\b", source, re.I)
-    if not normalize_date_value(result.get("departure_date")) and date_tokens:
-        result["departure_date"] = normalize_date_value(date_tokens[0])
+        codes = re.findall(r"(?<![A-Z0-9])W6\s?\d{4}(?!\d)|(?<![A-Z0-9])[A-Z]{2,3}\s?\d{1,4}(?!\d)", source, re.I)
+        codes = _unique_values(codes, _normalize_flight_number)
+        if len(codes) == 1:
+            result["flight_number"] = codes[0]
+
+    origin_values = _label_values(source, ("from", "origin", "departure airport", "מוצא"))
+    destination_values = _label_values(source, ("to", "destination", "arrival airport", "יעד"))
+    set_if_missing("origin", origin_values)
+    set_if_missing("destination", destination_values)
+    if len(origin_values) > 1 or len(destination_values) > 1:
+        result["origin"] = ""
+        result["destination"] = ""
+    route_pairs = re.findall(r"(?im)^\s*([A-Za-z][A-Za-z .'-]{1,30}?)\s+(?:to|→)\s+([A-Za-z][A-Za-z .'-]{1,30}?)\s*$", source)
+    route_pairs = _unique_values((f"{a.strip()} → {b.strip()}" for a, b in route_pairs), str.casefold)
+    if len(route_pairs) == 1 and (not result.get("origin") or not result.get("destination")):
+        origin, destination = route_pairs[0].split(" → ", 1)
+        result.setdefault("origin", origin)
+        result.setdefault("destination", destination)
+    elif len(route_pairs) > 1:
+        result["origin"] = ""
+        result["destination"] = ""
+
+    set_if_missing("departure_date", _label_values(source, ("departure date", "date", "תאריך יציאה")), _normalize_explicit_date)
+    if not normalize_date_value(result.get("departure_date")):
+        dates = [_normalize_explicit_date(value) for value in _explicit_date_tokens(source)]
+        if len(set(filter(None, dates))) == 1:
+            result["departure_date"] = next(iter(set(filter(None, dates))))
     else:
-        result["departure_date"] = normalize_date_value(result.get("departure_date")) or result.get("departure_date", "")
+        result["departure_date"] = normalize_date_value(result["departure_date"])
+    set_if_missing("arrival_date", _label_values(source, ("arrival date", "תאריך נחיתה")), _normalize_explicit_date)
     if result.get("arrival_date"):
-        result["arrival_date"] = normalize_date_value(result.get("arrival_date")) or result.get("arrival_date")
+        result["arrival_date"] = normalize_date_value(result["arrival_date"]) or result["arrival_date"]
+
     times = re.findall(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b", source)
-    arrival_match = re.search(r"(?:arrival|arrive|הגעה)[^\d]{0,20}((?:[01]?\d|2[0-3]):[0-5]\d)", source, re.I)
-    if not str(result.get("departure_time") or "").strip() and times:
+    set_if_missing("departure_time", _label_values(source, ("departure time", "departure", "שעת יציאה")), lambda value: value.zfill(5))
+    set_if_missing("arrival_time", _label_values(source, ("arrival time", "arrival", "שעת נחיתה", "הגעה")), lambda value: value.zfill(5))
+    if not result.get("departure_time") and times:
         result["departure_time"] = times[0].zfill(5)
-    if not str(result.get("arrival_time") or "").strip():
-        result["arrival_time"] = arrival_match.group(1).zfill(5) if arrival_match else (times[1].zfill(5) if len(times) > 1 else "")
+    if not result.get("arrival_time") and len(times) == 2:
+        result["arrival_time"] = times[1].zfill(5)
     return result
+
+
+def normalize_flight_segments(ai, text=""):
+    """Return explicit flight segments separately; never collapse conflicting segments."""
+    supplied = (ai or {}).get("segments") if isinstance(ai, dict) else None
+    if isinstance(supplied, list) and supplied:
+        normalized = []
+        for segment in supplied:
+            if not isinstance(segment, dict):
+                continue
+            item = normalize_flight_fields(segment, "")
+            if item.get("flight_number"):
+                item["flight_number"] = _normalize_flight_number(item["flight_number"])
+            if item.get("departure_date"):
+                item["departure_date"] = normalize_date_value(item["departure_date"]) or item["departure_date"]
+            if item.get("arrival_date"):
+                item["arrival_date"] = normalize_date_value(item["arrival_date"]) or item["arrival_date"]
+            for key in ("departure_time", "arrival_time"):
+                if item.get(key):
+                    item[key] = str(item[key]).zfill(5)
+            normalized.append(item)
+        return normalized
+    blocks = re.split(r"(?im)(?=^\s*(?:flight|segment|טיסה)\s*(?:#|מספר)?\s*\d+\b)", str(text or ""))
+    blocks = [block.strip() for block in blocks if block.strip()]
+    if len(blocks) > 1:
+        return [normalize_flight_fields({}, block) for block in blocks]
+    return [normalize_flight_fields(ai or {}, text)]
 
 
 def email_body_text(record):
@@ -647,6 +825,18 @@ def process_incoming_email(record):
     if not claimed:
         return None
     record = claimed
+    source_filename = ""
+    source_kind = "email_body"
+    mime_type = "text/plain"
+    byte_size = 0
+    extracted_text_length = 0
+    telemetry_outcome = "failure"
+    telemetry_type = "other"
+    telemetry_status = "unknown"
+    validation_error_code = ""
+    validation_error_field = ""
+    persistence_outcome = "not_persisted"
+    final_record_status = "processing"
     try:
         update_email_stage(intake_id, "reading")
         subject = str(record.get("subject") or "")
@@ -654,61 +844,123 @@ def process_incoming_email(record):
         update_email_stage(intake_id, "preparing_source")
         prepared = prepare_email_source(record)
         if not prepared:
+            source_filename = f"email-{intake_id}.txt"
+            extracted_text_length = len(body)
             if not looks_like_travel_email(subject, body):
+                final_record_status = "ignored"
+                telemetry_outcome = "skipped"
+                persistence_outcome = "ignored"
+                validation_error_code = "not_travel_email"
                 update_email_record(intake_id, status="ignored", intent="unknown", processed_at=_utc_now().isoformat())
                 return record
+            final_record_status = "needs_review"
+            validation_error_code = "no_source"
             update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="no_supported_attachment_or_text", processed_at=_utc_now().isoformat())
             if TOKEN and ALLOWED_CHAT:
                 send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
             return record
         filename, path = prepared
+        source_filename = filename
+        source_kind = "attachment" if email_attachment_candidates(record) else "email_body"
+        attachment = next((item for candidate, item in email_attachment_candidates(record) if candidate.name == path.name), None)
+        mime_type = (attachment or {}).get("content_type") or mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        try:
+            byte_size = path.stat().st_size
+        except OSError:
+            byte_size = 0
+        extracted_text_length = len(extract_pdf_text(path) or "")
         update_email_stage(intake_id, "extracting")
         ai = gemini_extract(path) or {}
         if not ai:
+            final_record_status = "needs_review"
+            validation_error_code = "provider_unavailable"
             update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="ai_extraction_failed", processed_at=_utc_now().isoformat())
             if TOKEN and ALLOWED_CHAT:
                 send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
             return record
         intent = intent_from_ai(ai, subject, body)
+        telemetry_type = _telemetry_choice(ai.get("type"), _TELEMETRY_TYPES, "other")
+        telemetry_status = _telemetry_choice(ai.get("status"), _TELEMETRY_STATUSES, "unknown")
         update_email_stage(intake_id, "applying", error=None)
         if intent == "unknown":
+            final_record_status = "needs_review"
+            validation_error_code = "unknown_status"
+            validation_error_field = "status"
             update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="ai_status_missing", processed_at=_utc_now().isoformat())
             if TOKEN and ALLOWED_CHAT:
                 send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
             return record
         if intent in {"cancelled", "refunded"}:
             applied, reason = apply_email_cancellation(ai, record, status=intent)
-            update_email_record(intake_id, status="processed" if applied else "needs_review", intent=intent, lifecycle_action=intent if applied else "review", review_reason="" if applied else reason, processed_at=datetime.now(timezone.utc).isoformat())
+            final_record_status = "processed" if applied else "needs_review"
+            telemetry_outcome = "success" if applied else "failure"
+            persistence_outcome = "updated" if applied else "not_persisted"
+            if not applied:
+                validation_error_code = "no_unique_match"
+            update_email_record(intake_id, status=final_record_status, intent=intent, lifecycle_action=intent if applied else "review", review_reason="" if applied else reason, processed_at=datetime.now(timezone.utc).isoformat())
             if TOKEN and ALLOWED_CHAT:
                 send(ALLOWED_CHAT, email_notification(intent, record, review=not applied))
             return record
         if intent == "modified":
+            final_record_status = "needs_review"
+            validation_error_code = "validation_failed"
+            validation_error_field = "status"
             update_email_record(intake_id, status="needs_review", intent=intent, review_reason="replacement_requires_review", processed_at=_utc_now().isoformat())
             if TOKEN and ALLOWED_CHAT:
                 send(ALLOWED_CHAT, email_notification(intent, record, review=True))
             return record
         try:
             persisted_trip = find_email_trip(filename)
+            had_persisted_trip = bool(persisted_trip)
             trip = persisted_trip or create_trip_from_document(filename, path, "Email", ai_override=ai)
             persisted_trips = load_trips()
             persisted_trip = next((item for item in persisted_trips if str(item.get("id")) == str(trip.get("id"))), trip)
             decorate_trip_booking(persisted_trip, ai, filename, intake_id)
             save_trips(persisted_trips)
             trip = persisted_trip
+            final_record_status = "processed"
+            telemetry_outcome = "success"
+            persistence_outcome = "updated" if had_persisted_trip else "created"
             update_email_record(intake_id, status="processed", intent=intent, processed_at=_utc_now().isoformat(), ingested_type=trip.get("_ingested_type", "hotel"), trip_id=trip.get("id"), document=filename, processing_error="")
             if TOKEN and ALLOWED_CHAT:
                 send(ALLOWED_CHAT, email_notification(intent, record, trip=trip))
             return record
         except Exception as exc:
+            final_record_status = "needs_review"
+            validation_error_code = "validation_failed"
+            validation_error_field = "type"
+            persistence_outcome = "failed"
             update_email_record(intake_id, status="needs_review", intent=intent, review_reason=f"{type(exc).__name__}: {str(exc)[:160]}", processed_at=_utc_now().isoformat())
             update_email_stage(intake_id, "failed", error=exc)
             if TOKEN and ALLOWED_CHAT:
                 send(ALLOWED_CHAT, email_notification(intent, record, review=True))
             return record
     except Exception as exc:
+        final_record_status = "needs_review"
+        validation_error_code = "persistence_failed"
+        persistence_outcome = "failed"
         update_email_record(intake_id, status="needs_review", processed_at=_utc_now().isoformat())
         update_email_stage(intake_id, "failed", error=exc)
         return record
+    finally:
+        record_extraction_attempt(
+            intake_id,
+            source_filename=source_filename,
+            source_kind=source_kind,
+            mime_type=mime_type,
+            byte_size=byte_size,
+            extracted_text_length=extracted_text_length,
+            provider="gemini",
+            model=GEMINI_MODEL,
+            outcome=telemetry_outcome,
+            status=final_record_status,
+            retry_count=record.get("processing_attempts", 0),
+            normalized_type=telemetry_type,
+            normalized_status=telemetry_status,
+            validation_error_code=validation_error_code,
+            validation_error_field=validation_error_field,
+            persistence_outcome=persistence_outcome,
+        )
 
 
 def resume_pending_email_processing():
@@ -746,7 +998,7 @@ def extract_pdf_text(path):
 
 def gemini_extract(path, mime_type=None):
     if not GEMINI_API_KEY: return None
-    schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","restaurant","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"restaurant_name":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"address":{"type":"string"},"phone":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},"policy_number":{"type":"string"},"insurer":{"type":"string"},"insured_travelers":{"type":"array","items":{"type":"string"}},"valid_from":{"type":"string"},"valid_to":{"type":"string"},"coverage_summary":{"type":"string"},"covered_items":{"type":"array","items":{"type":"string"}},"exclusions":{"type":"array","items":{"type":"string"}},"what_to_do":{"type":"array","items":{"type":"string"}},"emergency_contacts":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"phone":{"type":"string"},"hours":{"type":"string"}}}},"source_language":{"type":"string"},"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type","status"]}
+    schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","restaurant","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"segments":{"type":"array","items":{"type":"object","properties":{"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"}}}},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"restaurant_name":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"address":{"type":"string"},"phone":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},"policy_number":{"type":"string"},"insurer":{"type":"string"},"insured_travelers":{"type":"array","items":{"type":"string"}},"valid_from":{"type":"string"},"valid_to":{"type":"string"},"coverage_summary":{"type":"string"},"covered_items":{"type":"array","items":{"type":"string"}},"exclusions":{"type":"array","items":{"type":"string"}},"what_to_do":{"type":"array","items":{"type":"string"}},"emergency_contacts":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"phone":{"type":"string"},"hours":{"type":"string"}}}},"source_language":{"type":"string"},"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type","status"]}
     prompt = "Classify this travel document, email or screenshot and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, restaurant, insurance, or other. For every date field, return ISO YYYY-MM-DD only; for every time field, return 24-hour HH:MM only; if the source does not state a fact unambiguously, return an empty string. status must describe the lifecycle of this booking message: confirmed for a new/active reservation, modified only when the reservation dates, route, room, passenger, or other booking facts were actually changed, cancelled only when the reservation itself was cancelled, and refunded only when a refund was actually issued. Do not infer modified or cancelled from generic footer text, a cancellation policy, refund policy, last-updated timestamps, account links, or instructions to update preferences. Never guess; use empty strings or empty arrays when a fact is absent. A flight requires airline, flight_number, origin, destination, departure_date, departure_time, and arrival_time when clearly present. A car rental requires pickup_date, pickup_time, pickup_location, and vehicle_type; preserve dropoff fields when clearly present. A restaurant reservation must include restaurant_name, date and time, and address/phone when clearly present. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel. Insurance is one trip-level policy: preserve only source facts, translate concise coverage and emergency instructions into plain Hebrew when the source is not Hebrew, and keep the original document as the source of truth. Do not invent coverage, exclusions, phone numbers, or medical advice."
     mime_type = mime_type or {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain", ".html":"text/html", ".htm":"text/html"}.get(path.suffix.lower(), "application/pdf")
     source_text = extract_pdf_text(path)
@@ -849,7 +1101,8 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
     ai = ai_override if ai_override is not None else (gemini_extract(path, mime_type=mime_type) or {})
     doc_type = infer_document_type(ai, text)
     if doc_type == "flight":
-        ai = normalize_flight_fields(ai, text)
+        segments = normalize_flight_segments(ai, text)
+        ai = segments[0] if len(segments) == 1 else {**ai, "segments": segments}
     if doc_type == "attraction" and not all(str(ai.get(k) or "").strip() for k in ("attraction", "date", "time", "location")):
         focused = gemini_extract_attraction(path)
         if focused: ai.update(focused); ai["type"] = "attraction"
@@ -857,32 +1110,40 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
     if doc_type == "other":
         raise ValueError("document type not recognized; send a clearer screenshot or PDF")
     if doc_type == "flight":
-        departure = str(ai.get("departure_date") or "").strip()
-        arrival = str(ai.get("arrival_date") or departure).strip()
-        required = [str(ai.get(k) or "").strip() for k in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_time")]
+        flight_segments = normalize_flight_segments(ai, "")
         def valid_date(value):
             try:
                 return bool(re.fullmatch(r"20\d{2}-\d{2}-\d{2}", value)) and datetime.fromisoformat(value).date().isoformat() == value
             except ValueError:
                 return False
         valid_time = lambda value: bool(re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value))
-        if not departure or not arrival or not all(required) or not valid_date(departure) or not valid_date(arrival) or not valid_time(str(ai.get("departure_time"))) or not valid_time(str(ai.get("arrival_time"))):
-            raise ValueError("flight document missing unambiguous flight facts")
+        records = []
+        for segment in flight_segments:
+            departure = str(segment.get("departure_date") or "").strip()
+            arrival = str(segment.get("arrival_date") or departure).strip()
+            required = [str(segment.get(k) or "").strip() for k in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_time")]
+            if not departure or not arrival or not all(required) or not valid_date(departure) or not valid_date(arrival) or not valid_time(str(segment.get("departure_time"))) or not valid_time(str(segment.get("arrival_time"))):
+                raise ValueError("flight document missing unambiguous flight facts")
+            records.append({"airline":segment.get("airline"),"number":_normalize_flight_number(segment.get("flight_number")),"origin":segment.get("origin"),"destination":segment.get("destination"),"departure_date":departure,"departure_time":segment.get("departure_time"),"arrival_date":arrival,"arrival_time":segment.get("arrival_time"),"document":filename})
+        departure = min(record["departure_date"] for record in records)
+        arrival = max(record["arrival_date"] for record in records)
         trips = load_trips()
         target = dated_trip_target(trips, departure)
-        event = [str(ai.get("departure_time")), "✈️", f"טיסה {ai.get('airline')} {ai.get('flight_number')}", f"{ai.get('origin')} → {ai.get('destination')} · יציאה {ai.get('departure_time')} · הגעה {ai.get('arrival_time')}", "טיסה", source, departure]
         if not target:
-            target = create_dated_trip_shell(trips, departure, arrival, source, filename, f"טיול · {ai.get('destination')}")
-        target.setdefault("flights", []).append({"airline":ai.get("airline"),"number":ai.get("flight_number"),"origin":ai.get("origin"),"destination":ai.get("destination"),"departure_date":departure,"departure_time":ai.get("departure_time"),"arrival_date":arrival,"arrival_time":ai.get("arrival_time"),"document":filename})
+            target = create_dated_trip_shell(trips, departure, arrival, source, filename, f"טיול · {records[0].get('destination')}")
+        target.setdefault("flights", []).extend(records)
         target["flights"] = list({json.dumps(f, sort_keys=True, ensure_ascii=False): f for f in target["flights"]}.values())
         target.setdefault("documents", []).append(filename)
         target["documents"] = list(dict.fromkeys(target["documents"]))
-        target.setdefault("document_titles", {})[filename] = f"כרטיס טיסה · {ai.get('airline')} {ai.get('flight_number')}"
+        target.setdefault("document_titles", {})[filename] = f"כרטיס טיסה · {records[0].get('airline')} {records[0].get('number')}"
         preserve_booking_metadata(target, source, status=str(ai.get("status") or "confirmed").strip().lower())
         save_trips(trips)
         events = load_events()
-        if not any(len(e) > 6 and e[2] == event[2] and e[6] == departure for e in events):
-            events.insert(0, event); save_events(events)
+        for record in records:
+            event = [str(record["departure_time"]), "✈️", f"טיסה {record['airline']} {record['number']}", f"{record['origin']} → {record['destination']} · יציאה {record['departure_time']} · הגעה {record['arrival_time']}", "טיסה", source, record["departure_date"]]
+            if not any(len(e) > 6 and e[2] == event[2] and e[6] == record["departure_date"] for e in events):
+                events.insert(0, event)
+        save_events(events)
         return {**target, "_ingested_type": "flight"}
     if doc_type == "insurance":
         trips = load_trips()
@@ -1383,7 +1644,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
         if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": load_trips()}); return
         if path == "/api/intake/email":
-            fields = ("id", "status", "intent", "subject", "from", "to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "ingested_type", "trip_id", "review_reason", "attachments")
+            fields = ("id", "status", "intent", "subject", "from", "to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "extraction_telemetry", "ingested_type", "trip_id", "review_reason", "attachments")
             emails = [{key: record.get(key) for key in fields} for record in load_email_index()]
             self._json(200, {"emails": emails}); return
         if path == "/api/intake/telegram":
