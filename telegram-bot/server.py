@@ -931,7 +931,8 @@ def process_incoming_email(record):
         try:
             persisted_trip = find_email_trip(filename)
             had_persisted_trip = bool(persisted_trip)
-            trip = persisted_trip or create_trip_from_document(filename, path, "Email", ai_override=ai)
+            context_text = "\n".join((subject, str(record.get("from") or ""), str(record.get("to") or ""), body))
+            trip = persisted_trip or create_trip_from_document(filename, path, "Email", ai_override=ai, context_text=context_text)
             persisted_trips = load_trips()
             persisted_trip = next((item for item in persisted_trips if str(item.get("id")) == str(trip.get("id"))), trip)
             decorate_trip_booking(persisted_trip, ai, filename, intake_id)
@@ -1102,10 +1103,12 @@ def extract_attraction_facts(text, ai):
     return {"name": name, "date": date, "time": time_value, "location": location}
 
 
-def infer_document_type(ai, text=""):
+def infer_document_type(ai, text="", context=""):
     doc_type = str(ai.get("type") or "").strip().lower()
     normalized = str(text or "").lower()
-    extended = infer_extended_type(ai, text)
+    context_normalized = str(context or "").lower()
+    combined = "\n".join(value for value in (normalized, context_normalized) if value)
+    extended = infer_extended_type(ai, combined)
     if extended: return extended
     attraction_markers = ("museum", "chocolate museum", "lindt home of chocolate", "single ticket", "admission", "ticket", "guided tour", "visit", "directions", "kilchberg", "attraction")
     attraction_score = sum(1 for marker in attraction_markers if marker in normalized)
@@ -1115,10 +1118,10 @@ def infer_document_type(ai, text=""):
     return doc_type or "other"
 
 
-def create_trip_from_document(filename, path, source="Telegram", ai_override=None, mime_type=None):
+def create_trip_from_document(filename, path, source="Telegram", ai_override=None, mime_type=None, context_text=""):
     text = extract_pdf_text(path)
     ai = ai_override if ai_override is not None else (gemini_extract(path, mime_type=mime_type) or {})
-    doc_type = infer_document_type(ai, text)
+    doc_type = infer_document_type(ai, text, context_text)
     if doc_type == "flight":
         segments = normalize_flight_segments(ai, text)
         ai = segments[0] if len(segments) == 1 else {**ai, "segments": segments}

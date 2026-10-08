@@ -4,6 +4,12 @@ from booking_types import infer_extended_type, normalize_insurance
 
 
 class BookingTypesTests(unittest.TestCase):
+    def test_car_rental_is_detected_from_avis_booking_language(self):
+        self.assertEqual(
+            infer_extended_type({}, "Avis car rental confirmation. Pickup location and drop-off date."),
+            "car_rental",
+        )
+
     def test_restaurant_is_detected_from_reservation_email(self):
         self.assertEqual(
             infer_extended_type({}, "restaurant reservation for dinner at 21:00"),
