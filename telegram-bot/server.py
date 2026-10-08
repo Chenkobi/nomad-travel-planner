@@ -521,7 +521,7 @@ def normalize_date_value(value):
             return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
         except ValueError:
             return ""
-    for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y"):
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y", "%d%b%Y", "%d%B%Y"):
         try:
             return datetime.strptime(text, fmt).date().isoformat()
         except ValueError:
@@ -559,7 +559,7 @@ def _normalize_flight_number(value):
 
 
 def _explicit_date_tokens(source):
-    tokens = re.findall(r"\b(?:\d{4}-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{1,2},?\s+20\d{2}|\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+20\d{2})\b", source, re.I)
+    tokens = re.findall(r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)20\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{1,2},?\s+20\d{2}|\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+20\d{2})\b", source, re.I)
     for hebrew, english in HEBREW_MONTHS.items():
         tokens.extend(re.findall(rf"\b\d{{1,2}}\s+{hebrew}\s+20\d{{2}}\b", source))
     return tokens
@@ -576,7 +576,8 @@ def normalize_flight_fields(ai, text=""):
     """Normalize one flight without selecting between conflicting explicit facts."""
     result = dict(ai or {})
     raw_source = str(text or "").replace("\u00a0", " ")
-    lines = [line.strip() for line in raw_source.splitlines() if line.strip()]
+    raw_lines = [line.strip() for line in raw_source.splitlines() if line.strip()]
+    lines = [line.strip() for line in raw_lines if line.strip()]
     deduped_lines = list(dict.fromkeys(re.sub(r"\s+", " ", line) for line in lines))
     source = "\n".join(deduped_lines)
     lower = source.casefold()
@@ -594,6 +595,8 @@ def normalize_flight_fields(ai, text=""):
             result["airline"] = "Wizz Air"
         elif "arkia" in lower:
             result["airline"] = "Arkia"
+        elif "sundor" in lower or "sun d'or" in lower or "el al group" in lower:
+            result["airline"] = "Sundor"
 
     set_if_missing("flight_number", _label_values(source, ("flight number", "flight no", "מספר טיסה")), _normalize_flight_number)
     if not str(result.get("flight_number") or "").strip():
@@ -618,6 +621,22 @@ def normalize_flight_fields(ai, text=""):
     elif len(route_pairs) > 1:
         result["origin"] = ""
         result["destination"] = ""
+
+    table_header = any(all(marker in line.casefold() for marker in ("from", "to", "flight", "departure", "arrival")) for line in raw_lines)
+    if table_header:
+        for line in raw_lines:
+            columns = [part.strip() for part in re.split(r"\s{2,}", line) if part.strip()]
+            if len(columns) < 5:
+                continue
+            code_match = re.fullmatch(r"[A-Z]{2,3}\s?\d{1,4}", columns[2], re.I)
+            if not code_match or not re.fullmatch(r"(?:[01]?\d|2[0-3]):[0-5]\d", columns[3]) or not re.fullmatch(r"(?:[01]?\d|2[0-3]):[0-5]\d", columns[4]):
+                continue
+            result["origin"] = columns[0]
+            result["destination"] = columns[1]
+            result["flight_number"] = _normalize_flight_number(columns[2])
+            result["departure_time"] = columns[3]
+            result["arrival_time"] = columns[4]
+            break
 
     set_if_missing("departure_date", _label_values(source, ("departure date", "date", "תאריך יציאה")), _normalize_explicit_date)
     if not normalize_date_value(result.get("departure_date")):

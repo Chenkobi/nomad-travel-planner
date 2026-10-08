@@ -59,6 +59,21 @@ class FlightTextFallbackTests(unittest.TestCase):
         self.assertEqual(result["departure_time"], "08:30")
         self.assertEqual(result["arrival_time"], "11:30")
 
+    def test_el_al_sundor_receipt_normalizes_compact_date_and_table_facts(self):
+        text = """SUNDOR
+EL AL GROUP
+From    To    Flight    Departure    Arrival
+TEL AVIV YAFO    BATUMI    LY5113    05:15    08:30
+23OCT2026"""
+        result = server.normalize_flight_fields({}, text)
+        self.assertEqual(result["airline"], "Sundor")
+        self.assertEqual(result["flight_number"], "LY5113")
+        self.assertEqual(result["origin"], "TEL AVIV YAFO")
+        self.assertEqual(result["destination"], "BATUMI")
+        self.assertEqual(result["departure_date"], "2026-10-23")
+        self.assertEqual(result["departure_time"], "05:15")
+        self.assertEqual(result["arrival_time"], "08:30")
+
     def test_duplicate_responsive_text_does_not_create_ambiguity(self):
         text = """Flight number: W61234
 Flight number: W61234
