@@ -49,7 +49,31 @@ class FutureBookingTests(unittest.TestCase):
                 server.save_trips([]); server.save_events([])
                 source = root / 'arkia.pdf'; source.write_bytes(b'%PDF fake')
                 trip = server.create_trip_from_document('arkia.pdf', source, 'Telegram', ai_override=ai)
-                self.assertEqual(trip['flights'][0]['arrival_date'], '2026-12-10')
+                self.assertEqual(trip["flights"][0]["arrival_date"], "2026-12-10")
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
+
+    def test_car_rental_month_name_dates_are_normalized_before_routing(self):
+        with TemporaryDirectory() as tmp:
+            old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                root = Path(tmp)
+                server.DATA = root / "events.json"
+                server.TRIPS = root / "trips.json"
+                server.UPLOADS = root / "uploads"
+                server.save_trips([])
+                path = root / "sixt.txt"
+                path.write_text("Sixt Milan Airport Malpensa T1", encoding="utf-8")
+                trip = server.create_trip_from_document(
+                    "sixt.txt", path, source="Email", ai_override={
+                        "type": "car_rental", "status": "confirmed",
+                        "pickup_date": "October 24, 2026", "pickup_time": "10:00",
+                        "pickup_location": "Milan Airport Malpensa T1", "vehicle_type": "compact",
+                        "dropoff_date": "October 27, 2026", "dropoff_time": "10:00",
+                        "dropoff_location": "Milan Airport Malpensa T1",
+                    })
+                self.assertEqual(trip["rentals"][0]["pickup_date"], "2026-10-24")
+                self.assertEqual(trip["rentals"][0]["dropoff_date"], "2026-10-27")
             finally:
                 server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
 

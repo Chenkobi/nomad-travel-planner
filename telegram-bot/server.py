@@ -433,6 +433,62 @@ def html_to_text(value):
     return re.sub(r"[ \t]+", " ", re.sub(r"\n{3,}", "\n\n", "".join(parser.parts))).strip()
 
 
+def normalize_date_value(value):
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text:
+        return ""
+    if re.fullmatch(r"20\d{2}-\d{2}-\d{2}", text):
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
+        except ValueError:
+            return ""
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y"):
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return ""
+
+
+def normalize_flight_fields(ai, text=""):
+    """Fill only explicit flight facts from the provider result or source text."""
+    result = dict(ai or {})
+    raw_source = str(text or "").replace("\u00a0", " ")
+    source = re.sub(r"\s+", " ", raw_source).strip()
+    lower = source.casefold()
+
+    if not str(result.get("airline") or "").strip():
+        for name in ("Arkia", "Wizz Air", "Wizz"):
+            if name.casefold() in lower:
+                result["airline"] = name
+                break
+    if not str(result.get("flight_number") or "").strip():
+        match = re.search(r"\b([A-Z]{1,3}\s?\d{1,4})\b", source, re.I)
+        if match:
+            result["flight_number"] = re.sub(r"\s+", " ", match.group(1).upper()).strip()
+    if not str(result.get("origin") or "").strip() or not str(result.get("destination") or "").strip():
+        route = re.search(r"(?im)^\s*([A-Za-z][A-Za-z .'-]{1,30}?)\s+(?:to|→)\s+([A-Za-z][A-Za-z .'-]{1,30}?)(?:\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|\d{4}-))?\s*$", raw_source)
+        if route:
+            if not str(result.get("origin") or "").strip():
+                result["origin"] = route.group(1).strip()
+            if not str(result.get("destination") or "").strip():
+                result["destination"] = route.group(2).strip()
+    date_tokens = re.findall(r"\b(?:\d{4}-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{1,2},\s+20\d{2}|\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+20\d{2})\b", source, re.I)
+    if not normalize_date_value(result.get("departure_date")) and date_tokens:
+        result["departure_date"] = normalize_date_value(date_tokens[0])
+    else:
+        result["departure_date"] = normalize_date_value(result.get("departure_date")) or result.get("departure_date", "")
+    if result.get("arrival_date"):
+        result["arrival_date"] = normalize_date_value(result.get("arrival_date")) or result.get("arrival_date")
+    times = re.findall(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b", source)
+    arrival_match = re.search(r"(?:arrival|arrive|הגעה)[^\d]{0,20}((?:[01]?\d|2[0-3]):[0-5]\d)", source, re.I)
+    if not str(result.get("departure_time") or "").strip() and times:
+        result["departure_time"] = times[0].zfill(5)
+    if not str(result.get("arrival_time") or "").strip():
+        result["arrival_time"] = arrival_match.group(1).zfill(5) if arrival_match else (times[1].zfill(5) if len(times) > 1 else "")
+    return result
+
+
 def email_body_text(record):
     folder = email_record_folder(record)
     text_path = folder / "body.txt"
@@ -691,9 +747,15 @@ def extract_pdf_text(path):
 def gemini_extract(path, mime_type=None):
     if not GEMINI_API_KEY: return None
     schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","restaurant","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"restaurant_name":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"address":{"type":"string"},"phone":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},"policy_number":{"type":"string"},"insurer":{"type":"string"},"insured_travelers":{"type":"array","items":{"type":"string"}},"valid_from":{"type":"string"},"valid_to":{"type":"string"},"coverage_summary":{"type":"string"},"covered_items":{"type":"array","items":{"type":"string"}},"exclusions":{"type":"array","items":{"type":"string"}},"what_to_do":{"type":"array","items":{"type":"string"}},"emergency_contacts":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"phone":{"type":"string"},"hours":{"type":"string"}}}},"source_language":{"type":"string"},"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type","status"]}
-    prompt = "Classify this travel document, email or screenshot and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, restaurant, insurance, or other. status must describe the lifecycle of this booking message: confirmed for a new/active reservation, modified only when the reservation dates, route, room, passenger, or other booking facts were actually changed, cancelled only when the reservation itself was cancelled, and refunded only when a refund was actually issued. Do not infer modified or cancelled from generic footer text, a cancellation policy, refund policy, last-updated timestamps, account links, or instructions to update preferences. Never guess; use empty strings or empty arrays when a fact is absent. A restaurant reservation must include restaurant_name, date and time, and address/phone when clearly present. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel. Insurance is one trip-level policy: preserve only source facts, translate concise coverage and emergency instructions into plain Hebrew when the source is not Hebrew, and keep the original document as the source of truth. Do not invent coverage, exclusions, phone numbers, or medical advice."
+    prompt = "Classify this travel document, email or screenshot and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, restaurant, insurance, or other. For every date field, return ISO YYYY-MM-DD only; for every time field, return 24-hour HH:MM only; if the source does not state a fact unambiguously, return an empty string. status must describe the lifecycle of this booking message: confirmed for a new/active reservation, modified only when the reservation dates, route, room, passenger, or other booking facts were actually changed, cancelled only when the reservation itself was cancelled, and refunded only when a refund was actually issued. Do not infer modified or cancelled from generic footer text, a cancellation policy, refund policy, last-updated timestamps, account links, or instructions to update preferences. Never guess; use empty strings or empty arrays when a fact is absent. A flight requires airline, flight_number, origin, destination, departure_date, departure_time, and arrival_time when clearly present. A car rental requires pickup_date, pickup_time, pickup_location, and vehicle_type; preserve dropoff fields when clearly present. A restaurant reservation must include restaurant_name, date and time, and address/phone when clearly present. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel. Insurance is one trip-level policy: preserve only source facts, translate concise coverage and emergency instructions into plain Hebrew when the source is not Hebrew, and keep the original document as the source of truth. Do not invent coverage, exclusions, phone numbers, or medical advice."
     mime_type = mime_type or {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain", ".html":"text/html", ".htm":"text/html"}.get(path.suffix.lower(), "application/pdf")
-    payload = {"contents":[{"parts":[{"text":prompt},{"inline_data":{"mime_type":mime_type,"data":base64.b64encode(path.read_bytes()).decode("ascii")}}]}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
+    source_text = extract_pdf_text(path)
+    parts = []
+    parts.append({"text": prompt})
+    if source_text.strip():
+        parts.append({"text": "Bounded extracted source text:\n" + source_text[:30000]})
+    parts.append({"inline_data":{"mime_type":mime_type,"data":base64.b64encode(path.read_bytes()).decode("ascii")}})
+    payload = {"contents":[{"parts":parts}],"generationConfig":{"responseMimeType":"application/json","responseSchema":schema,"temperature":0}}
     for attempt in range(3):
         try:
             req = urllib.request.Request(f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent", data=json.dumps(payload).encode(), headers={"Content-Type":"application/json","x-goog-api-key":GEMINI_API_KEY}, method="POST")
@@ -786,6 +848,8 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
     text = extract_pdf_text(path)
     ai = ai_override if ai_override is not None else (gemini_extract(path, mime_type=mime_type) or {})
     doc_type = infer_document_type(ai, text)
+    if doc_type == "flight":
+        ai = normalize_flight_fields(ai, text)
     if doc_type == "attraction" and not all(str(ai.get(k) or "").strip() for k in ("attraction", "date", "time", "location")):
         focused = gemini_extract_attraction(path)
         if focused: ai.update(focused); ai["type"] = "attraction"
@@ -848,10 +912,12 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         return {**target, "_ingested_type": "restaurant"}
     if doc_type == "car_rental":
         pickup_date = str(ai.get("pickup_date") or "").strip(); pickup_time = str(ai.get("pickup_time") or "").strip(); pickup_location = str(ai.get("pickup_location") or "").strip(); vehicle_type = str(ai.get("vehicle_type") or "").strip()
+        pickup_date = normalize_date_value(pickup_date) or pickup_date
+        dropoff_date = normalize_date_value(str(ai.get("dropoff_date") or "").strip()) or str(ai.get("dropoff_date") or "").strip()
         if not all((pickup_date, pickup_time, pickup_location, vehicle_type)): raise ValueError("car rental missing pickup location, time, date, or vehicle type")
         trips = load_trips(); target = dated_trip_target(trips, pickup_date)
-        if not target: target = create_dated_trip_shell(trips, pickup_date, str(ai.get("dropoff_date") or pickup_date).strip(), source, filename, f"טיול · {pickup_location}")
-        record = {"pickup_date":pickup_date,"pickup_time":pickup_time,"pickup_location":pickup_location,"vehicle_type":vehicle_type,"dropoff_date":str(ai.get("dropoff_date") or "").strip(),"dropoff_time":str(ai.get("dropoff_time") or "").strip(),"dropoff_location":str(ai.get("dropoff_location") or "").strip(),"document":filename}
+        if not target: target = create_dated_trip_shell(trips, pickup_date, dropoff_date or pickup_date, source, filename, f"טיול · {pickup_location}")
+        record = {"pickup_date":pickup_date,"pickup_time":pickup_time,"pickup_location":pickup_location,"vehicle_type":vehicle_type,"dropoff_date":dropoff_date,"dropoff_time":str(ai.get("dropoff_time") or "").strip(),"dropoff_location":str(ai.get("dropoff_location") or "").strip(),"document":filename}
         target.setdefault("rentals", []).append(record); target["rentals"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["rentals"]}.values()); preserve_booking_metadata(target, source, status=str(ai.get("status") or "confirmed").strip().lower()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"השכרת רכב · {vehicle_type}"; save_trips(trips)
         events = load_events(); title = f"איסוף רכב · {vehicle_type}"; details = f"{pickup_location} · שעה {pickup_time}"; event = [pickup_time, "🚗", title, details, "רכב", source, pickup_date, pickup_location]
         if not any(len(e) > 6 and e[2] == title and e[6] == pickup_date for e in events): events.insert(0, event); save_events(events)
