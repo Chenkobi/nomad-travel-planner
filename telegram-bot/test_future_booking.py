@@ -77,6 +77,29 @@ class FutureBookingTests(unittest.TestCase):
             finally:
                 server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
 
+    def test_insurance_month_name_dates_are_normalized_before_routing(self):
+        with TemporaryDirectory() as tmp:
+            old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                root = Path(tmp)
+                server.DATA = root / "events.json"
+                server.TRIPS = root / "trips.json"
+                server.UPLOADS = root / "uploads"
+                server.save_trips([])
+                path = root / "insurance.pdf"
+                path.write_bytes(b"%PDF fake")
+                trip = server.create_trip_from_document(
+                    "insurance.pdf", path, source="Email", ai_override={
+                        "type": "insurance", "status": "confirmed",
+                        "valid_from": "October 24, 2026", "valid_to": "October 31, 2026",
+                        "insurer": "TravelSafe", "policy_number": "P-123",
+                    })
+                self.assertEqual(trip["start"], "2026-10-24")
+                self.assertEqual(trip["end"], "2026-10-31")
+                self.assertEqual(trip["insurance"]["insurer"], "TravelSafe")
+                self.assertEqual(trip.get("events", []), [])
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
     def test_reversed_dated_shell_is_rejected(self):
         with self.assertRaises(ValueError):
             server.create_dated_trip_shell([], '2026-12-10', '2026-12-09', 'Email', 'bad.txt')

@@ -1175,7 +1175,8 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         return {**target, "_ingested_type": "flight"}
     if doc_type == "insurance":
         trips = load_trips()
-        policy_start = str(ai.get("valid_from") or ai.get("check_in") or ai.get("departure_date") or "").strip(); policy_end = str(ai.get("valid_to") or ai.get("check_out") or ai.get("arrival_date") or "").strip()
+        policy_start = normalize_date_value(str(ai.get("valid_from") or ai.get("check_in") or ai.get("departure_date") or "").strip()) or str(ai.get("valid_from") or ai.get("check_in") or ai.get("departure_date") or "").strip()
+        policy_end = normalize_date_value(str(ai.get("valid_to") or ai.get("check_out") or ai.get("arrival_date") or "").strip()) or str(ai.get("valid_to") or ai.get("check_out") or ai.get("arrival_date") or "").strip()
         target = dated_trip_target(trips, policy_start)
         if not target and policy_start:
             target = create_dated_trip_shell(trips, policy_start, policy_end or policy_start, source, filename, "טיול חדש · ביטוח")
