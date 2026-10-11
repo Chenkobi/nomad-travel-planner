@@ -766,6 +766,29 @@ def prepare_email_source(record):
     return stored, target
 
 
+def email_attachment_text_context(record, max_chars=30000):
+    """Collect bounded text from all readable attachments for cross-file extraction."""
+    parts = []
+    remaining = max(0, int(max_chars))
+    for source, attachment in email_attachment_candidates(record):
+        if remaining <= 0:
+            break
+        suffix = Path(str(attachment.get("filename") or source.name)).suffix.lower()
+        try:
+            if suffix in {".html", ".htm"} or attachment.get("content_type") == "text/html":
+                text = html_to_text(source.read_text(encoding="utf-8", errors="replace"))
+            elif suffix in {".pdf", ".txt"} or attachment.get("content_type") == "application/pdf":
+                text = extract_pdf_text(source)
+            else:
+                text = ""
+        except (OSError, UnicodeError):
+            text = ""
+        text = re.sub(r"\s+", " ", str(text or "")).strip()
+        if text:
+            chunk = text[:remaining]
+            parts.append(chunk)
+            remaining -= len(chunk)
+    return "\n".join(parts)
 def email_notification(intent, record, trip=None, review=False):
     subject = str(record.get("subject") or "מייל נסיעות").strip()
     if review:
@@ -929,7 +952,8 @@ def process_incoming_email(record):
             byte_size = 0
         extracted_text_length = len(extract_pdf_text(path) or "")
         update_email_stage(intake_id, "extracting")
-        ai = gemini_extract(path) or {}
+        attachment_context = email_attachment_text_context(record)
+        ai = gemini_extract(path, mime_type=mime_type, supplemental_text=attachment_context) or {}
         if not ai:
             final_record_status = "needs_review"
             validation_error_code = "provider_unavailable"
@@ -1056,12 +1080,15 @@ def extract_pdf_text(path):
     try: return path.read_bytes().decode("utf-8", errors="ignore")
     except OSError: return ""
 
-def gemini_extract(path, mime_type=None):
+def gemini_extract(path, mime_type=None, supplemental_text=""):
     if not GEMINI_API_KEY: return None
     schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","restaurant","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"segments":{"type":"array","items":{"type":"object","properties":{"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"}}}},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"restaurant_name":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"address":{"type":"string"},"phone":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},"policy_number":{"type":"string"},"insurer":{"type":"string"},"insured_travelers":{"type":"array","items":{"type":"string"}},"valid_from":{"type":"string"},"valid_to":{"type":"string"},"coverage_summary":{"type":"string"},"covered_items":{"type":"array","items":{"type":"string"}},"exclusions":{"type":"array","items":{"type":"string"}},"what_to_do":{"type":"array","items":{"type":"string"}},"emergency_contacts":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"phone":{"type":"string"},"hours":{"type":"string"}}}},"source_language":{"type":"string"},"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type","status"]}
     prompt = "Classify this travel document, email or screenshot and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, restaurant, insurance, or other. For every date field, return ISO YYYY-MM-DD only; for every time field, return 24-hour HH:MM only; if the source does not state a fact unambiguously, return an empty string. status must describe the lifecycle of this booking message: confirmed for a new/active reservation, modified only when the reservation dates, route, room, passenger, or other booking facts were actually changed, cancelled only when the reservation itself was cancelled, and refunded only when a refund was actually issued. Do not infer modified or cancelled from generic footer text, a cancellation policy, refund policy, last-updated timestamps, account links, or instructions to update preferences. Never guess; use empty strings or empty arrays when a fact is absent. A flight requires airline, flight_number, origin, destination, departure_date, departure_time, and arrival_time when clearly present. A car rental requires pickup_date, pickup_time, pickup_location, and vehicle_type; preserve dropoff fields when clearly present. A restaurant reservation must include restaurant_name, date and time, and address/phone when clearly present. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel. Insurance is one trip-level policy: preserve only source facts, translate concise coverage and emergency instructions into plain Hebrew when the source is not Hebrew, and keep the original document as the source of truth. Do not invent coverage, exclusions, phone numbers, or medical advice."
     mime_type = mime_type or {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain", ".html":"text/html", ".htm":"text/html"}.get(path.suffix.lower(), "application/pdf")
     source_text = extract_pdf_text(path)
+    supplemental_text = re.sub(r"\s+", " ", str(supplemental_text or "")).strip()
+    if supplemental_text:
+        source_text = (source_text + "\n" + supplemental_text).strip()
     parts = []
     parts.append({"text": prompt})
     if source_text.strip():

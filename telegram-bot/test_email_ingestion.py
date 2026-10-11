@@ -52,6 +52,23 @@ class EmailIngestionTests(unittest.TestCase):
             finally:
                 server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index
 
+    def test_attachment_context_aggregates_additional_html_sources(self):
+        message = EmailMessage()
+        message['Subject'] = 'Train booking confirmation'
+        message.set_content('See attached documents.')
+        message.add_attachment(b'%PDF-1.4 primary', maintype='application', subtype='pdf', filename='ticket-confirmation.pdf')
+        html = '<html><body><p>Passenger train ICE 701</p><p>Berlin to Munich</p></body></html>'
+        message.add_attachment(html.encode(), maintype='text', subtype='html', filename='booking-details.html')
+        with TemporaryDirectory() as tmp:
+            old_dir, old_index = self._configure_temp_email_dir(tmp)
+            try:
+                record, duplicate = server.store_incoming_email(message.as_bytes())
+                self.assertFalse(duplicate)
+                context = server.email_attachment_text_context(record)
+                self.assertIn('Passenger train ICE 701', context)
+                self.assertIn('Berlin to Munich', context)
+            finally:
+                server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index
     def test_relevant_attachment_is_selected_over_logo_when_multiple_exist(self):
         message = EmailMessage()
         message['Subject'] = 'Car rental confirmation'
