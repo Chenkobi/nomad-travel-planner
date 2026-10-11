@@ -808,7 +808,12 @@ def normalize_flight_segments(ai, text=""):
         for segment in supplied:
             if not isinstance(segment, dict):
                 continue
-            item = normalize_flight_fields(segment, "")
+            if len(supplied) == 1:
+                inherited = {key: value for key, value in (ai or {}).items() if key != "segments"}
+                inherited.update(segment)
+                item = normalize_flight_fields(inherited, text)
+            else:
+                item = normalize_flight_fields(segment, "")
             if item.get("flight_number"):
                 item["flight_number"] = _normalize_flight_number(item["flight_number"])
             if item.get("departure_date"):

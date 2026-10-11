@@ -120,6 +120,20 @@ Arrival time: 11:30"""
         self.assertEqual([item["flight_number"] for item in result], ["W6 1234", "W6 5678"])
         self.assertEqual([(item["origin"], item["destination"]) for item in result], [("Tel Aviv", "Budapest"), ("Budapest", "London")])
 
+    def test_single_incomplete_gemini_segment_is_completed_from_pdf_text(self):
+        ai = {"type": "flight", "segments": [{"airline": "Sundor", "flight_number": "LY5113", "departure_date": "2026-10-23"}]}
+        text = """SUNDOR
+EL AL GROUP
+From    To    Flight    Departure    Arrival
+TEL AVIV YAFO    BATUMI    LY5113    05:15    08:30
+23OCT2026"""
+        result = server.normalize_flight_segments(ai, text)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["origin"], "TEL AVIV YAFO")
+        self.assertEqual(result[0]["destination"], "BATUMI")
+        self.assertEqual(result[0]["departure_time"], "05:15")
+        self.assertEqual(result[0]["arrival_time"], "08:30")
+
     def test_create_trip_persists_each_explicit_segment_as_flat_flight_record(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
