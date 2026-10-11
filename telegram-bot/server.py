@@ -197,6 +197,26 @@ def load_email_index():
         return []
 
 
+def load_notifications(limit=50):
+    """Return bounded, non-sensitive in-app notifications from intake outcomes."""
+    notifications = []
+    for record in load_email_index():
+        status = str(record.get("status") or "").strip()
+        if status not in {"processed", "needs_review", "failed"}:
+            continue
+        notifications.append({
+            "id": str(record.get("id") or ""),
+            "status": status,
+            "intent": str(record.get("intent") or "unknown"),
+            "subject": str(record.get("subject") or "מייל נסיעות")[:180],
+            "received_at": record.get("received_at") or "",
+            "processed_at": record.get("processed_at") or "",
+            "review_reason": str(record.get("review_reason") or "")[:180],
+            "trip_id": record.get("trip_id"),
+        })
+        if len(notifications) >= max(1, min(int(limit), 100)):
+            break
+    return notifications
 def save_email_index(items):
     EMAIL_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=EMAIL_DIR, prefix=".index.", suffix=".tmp", encoding="utf-8", delete=False) as handle:
@@ -1747,6 +1767,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(502, {"error":"rates_unavailable"}); return
         if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
         if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": load_trips()}); return
+        if path == "/api/notifications": self._json(200, {"notifications": load_notifications(), "unread": len(load_notifications())}); return
         if path == "/api/intake/email":
             fields = ("id", "status", "intent", "subject", "from", "to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "extraction_telemetry", "ingested_type", "trip_id", "review_reason", "attachments")
             emails = [{key: record.get(key) for key in fields} for record in load_email_index()]

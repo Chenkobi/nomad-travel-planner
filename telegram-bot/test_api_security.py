@@ -95,6 +95,20 @@ class ApiSecurityTests(unittest.TestCase):
         self.assertEqual(options.status, 204)
         self.assertIn("Authorization", options.headers.get("Access-Control-Allow-Headers", ""))
 
+    def test_notifications_endpoint_returns_review_and_processed_items(self):
+        server.EMAIL_DIR = Path(self.tempdir.name) / "email"
+        server.EMAIL_INDEX = server.EMAIL_DIR / "index.json"
+        server.EMAIL_DIR.mkdir()
+        server.save_email_index([
+            {"id": "review-1", "status": "needs_review", "subject": "Avis", "received_at": "2026-10-11T10:00:00+00:00", "review_reason": "ai_status_missing"},
+            {"id": "done-1", "status": "processed", "intent": "confirmed", "subject": "Hotel", "received_at": "2026-10-11T09:00:00+00:00", "processed_at": "2026-10-11T09:01:00+00:00"},
+        ])
+        response = self.request("/api/notifications", {"Authorization": "Bearer test-token"})
+        self.assertEqual(response.status, 200)
+        payload = json.loads(response.read())
+        self.assertEqual([item["id"] for item in payload["notifications"]], ["review-1", "done-1"])
+        self.assertEqual(payload["unread"], 2)
+
     def test_disallowed_cors_origin_is_not_granted(self):
         response = self.request(
             "/api/trips",
