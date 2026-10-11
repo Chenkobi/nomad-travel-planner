@@ -469,14 +469,20 @@ def email_attachment_candidates(record):
     supported = {"application/pdf", "image/jpeg", "image/png", "image/webp", "text/html"}
     folder = email_record_folder(record)
     candidates = []
-    for attachment in record.get("attachments", []):
+    for index, attachment in enumerate(record.get("attachments", [])):
         suffix = Path(str(attachment.get("filename") or "")).suffix.lower()
         if attachment.get("content_type") not in supported and suffix not in {".pdf", ".html", ".htm", ".jpg", ".jpeg", ".png", ".webp"}:
             continue
         source = folder / str(attachment.get("path") or "")
-        if source.is_file():
-            candidates.append((source, attachment))
-    return candidates
+        if not source.is_file():
+            continue
+        name = str(attachment.get("filename") or "").casefold()
+        score = {".pdf": 5, ".html": 4, ".htm": 4, ".jpg": 2, ".jpeg": 2, ".png": 1, ".webp": 1}.get(suffix, 0)
+        score += sum(3 for marker in ("confirmation", "voucher", "itinerary", "booking", "reservation", "ticket", "receipt", "invoice", "policy", "rental") if marker in name)
+        score -= sum(5 for marker in ("logo", "signature", "tracking", "pixel", "footer") if marker in name)
+        candidates.append((score, index, source, attachment))
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return [(source, attachment) for _, _, source, attachment in candidates]
 
 
 class _EmailHTMLText(HTMLParser):

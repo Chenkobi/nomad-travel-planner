@@ -52,6 +52,24 @@ class EmailIngestionTests(unittest.TestCase):
             finally:
                 server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index
 
+    def test_relevant_attachment_is_selected_over_logo_when_multiple_exist(self):
+        message = EmailMessage()
+        message['Subject'] = 'Car rental confirmation'
+        message.set_content('See attached booking.')
+        message.add_attachment(b'logo', maintype='image', subtype='png', filename='company-logo.png')
+        message.add_attachment(b'%PDF-1.4 rental', maintype='application', subtype='pdf', filename='rental-confirmation.pdf')
+        with TemporaryDirectory() as tmp:
+            old_dir, old_index = self._configure_temp_email_dir(tmp)
+            old_uploads = server.UPLOADS
+            try:
+                server.UPLOADS = Path(tmp) / 'uploads'
+                record, duplicate = server.store_incoming_email(message.as_bytes())
+                self.assertFalse(duplicate)
+                source = server.prepare_email_source(record)
+                self.assertIsNotNone(source)
+                self.assertTrue(source[0].endswith('rental-confirmation.pdf'))
+            finally:
+                server.EMAIL_DIR, server.EMAIL_INDEX, server.UPLOADS = old_dir, old_index, old_uploads
     def test_processing_claim_is_atomic_for_concurrent_delivery(self):
         message = EmailMessage()
         message['Message-ID'] = '<concurrent@example.test>'
