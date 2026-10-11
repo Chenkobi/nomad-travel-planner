@@ -1,9 +1,11 @@
 FROM python:3.12-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir pywebpush
 COPY index.html /app/index.html
 COPY tripy-icon.png /app/tripy-icon.png
 COPY manifest.webmanifest /app/manifest.webmanifest
+COPY service-worker.js /app/service-worker.js
 COPY telegram-bot/server.py /app/telegram-bot/server.py
 COPY telegram-bot/email_rules.py /app/telegram-bot/email_rules.py
 COPY telegram-bot/booking_lifecycle.py /app/telegram-bot/booking_lifecycle.py

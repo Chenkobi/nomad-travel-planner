@@ -11,6 +11,15 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import mimetypes
+try:
+    from pywebpush import webpush as _webpush
+except ImportError:
+    _webpush = None
+try:
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
+except ImportError:
+    ec = None
 
 from booking_lifecycle import (
     BookingDateError,
@@ -38,6 +47,9 @@ API_ALLOWED_ORIGIN = os.getenv("TRIPY_API_ALLOWED_ORIGIN", "https://trip.atlasim
 EMAIL_DIR = Path(os.getenv("TRIPY_EMAIL_DIR", ROOT / "trip-email"))
 EMAIL_INDEX = EMAIL_DIR / "index.json"
 TELEGRAM_INTAKE = Path(os.getenv("TRIPY_TELEGRAM_INTAKE_FILE", ROOT / "telegram-intake.json"))
+PUSH_SUBSCRIPTIONS = Path(os.getenv("TRIPY_PUSH_SUBSCRIPTIONS_FILE", ROOT / "push-subscriptions.json"))
+VAPID_KEYS = Path(os.getenv("TRIPY_VAPID_KEYS_FILE", ROOT / "vapid-keys.json"))
+VAPID_SUBJECT = os.getenv("TRIPY_VAPID_SUBJECT", "mailto:trippy@atlasim.co.il").strip()
 EMAIL_PROCESSING_LEASE_SECONDS = int(os.getenv("TRIPY_EMAIL_PROCESSING_LEASE_SECONDS", "900"))
 TELEGRAM_STARTUP_RETRIES = max(1, int(os.getenv("TRIPY_TELEGRAM_STARTUP_RETRIES", "3")))
 TELEGRAM_RETRY_DELAY_SECONDS = max(0, float(os.getenv("TRIPY_TELEGRAM_RETRY_DELAY_SECONDS", "5")))
@@ -217,6 +229,75 @@ def load_notifications(limit=50):
         if len(notifications) >= max(1, min(int(limit), 100)):
             break
     return notifications
+def _load_json_list(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        return value if isinstance(value, list) else []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def _save_json_private(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", encoding="utf-8", delete=False) as handle:
+        handle.write(json.dumps(value, ensure_ascii=False, indent=2))
+        tmp = Path(handle.name)
+    tmp.replace(path)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def vapid_public_key():
+    if ec is None:
+        return ""
+    if not VAPID_KEYS.exists():
+        private = ec.generate_private_key(ec.SECP256R1())
+        public = private.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+        private_pem = private.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()).decode("ascii")
+        _save_json_private(VAPID_KEYS, {"private_key": private_pem, "public_key": base64.urlsafe_b64encode(public).decode("ascii").rstrip("=")})
+    try:
+        value = json.loads(VAPID_KEYS.read_text(encoding="utf-8"))
+        return str(value.get("public_key") or "")
+    except (OSError, ValueError, TypeError):
+        return ""
+
+
+def save_push_subscription(subscription):
+    endpoint = str((subscription or {}).get("endpoint") or "").strip()
+    if not endpoint or len(endpoint) > 2048:
+        raise ValueError("invalid_push_endpoint")
+    keys = subscription.get("keys") if isinstance(subscription, dict) else {}
+    if not isinstance(keys, dict) or not keys.get("p256dh") or not keys.get("auth"):
+        raise ValueError("invalid_push_keys")
+    items = _load_json_list(PUSH_SUBSCRIPTIONS)
+    items = [item for item in items if str(item.get("endpoint") or "") != endpoint]
+    items.append({"endpoint": endpoint, "keys": {"p256dh": str(keys["p256dh"]), "auth": str(keys["auth"])}})
+    _save_json_private(PUSH_SUBSCRIPTIONS, items[-20:])
+
+
+def send_push_notification(title, body, tag="tripy-booking"):
+    if _webpush is None or not VAPID_KEYS.exists():
+        return 0
+    try:
+        keys = json.loads(VAPID_KEYS.read_text(encoding="utf-8"))
+        private_key = keys.get("private_key")
+    except (OSError, ValueError, TypeError):
+        return 0
+    delivered = 0
+    stale = []
+    payload = json.dumps({"title": str(title)[:80], "body": str(body)[:240], "tag": tag, "url": "/"}, ensure_ascii=False)
+    for subscription in _load_json_list(PUSH_SUBSCRIPTIONS):
+        try:
+            _webpush(subscription_info=subscription, data=payload, vapid_private_key=private_key, vapid_claims={"sub": VAPID_SUBJECT})
+            delivered += 1
+        except Exception as exc:
+            if "404" in str(exc) or "410" in str(exc):
+                stale.append(subscription.get("endpoint"))
+    if stale:
+        _save_json_private(PUSH_SUBSCRIPTIONS, [item for item in _load_json_list(PUSH_SUBSCRIPTIONS) if item.get("endpoint") not in stale])
+    return delivered
 def save_email_index(items):
     EMAIL_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=EMAIL_DIR, prefix=".index.", suffix=".tmp", encoding="utf-8", delete=False) as handle:
@@ -1068,8 +1149,9 @@ def process_incoming_email(record):
             validation_error_field=validation_error_field,
             persistence_outcome=persistence_outcome,
         )
-
-
+        if final_record_status in {"processed", "needs_review", "failed"}:
+            label = "TRIPY: הזמנה נקלטה" if final_record_status == "processed" else "TRIPY: נדרשת בדיקה"
+            send_push_notification(label, str(record.get("subject") or "מייל נסיעות"), tag=f"tripy-{intake_id}")
 def resume_pending_email_processing():
     for record in load_email_index():
         if record.get("status") in {"received", "processing"}:
@@ -1767,6 +1849,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(502, {"error":"rates_unavailable"}); return
         if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
         if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": load_trips()}); return
+        if path == "/api/push/vapid-public-key": self._json(200, {"public_key": vapid_public_key()}); return
         if path == "/api/notifications": self._json(200, {"notifications": load_notifications(), "unread": len(load_notifications())}); return
         if path == "/api/intake/email":
             fields = ("id", "status", "intent", "subject", "from", "to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "extraction_telemetry", "ingested_type", "trip_id", "review_reason", "attachments")
@@ -1791,7 +1874,7 @@ class Handler(BaseHTTPRequestHandler):
             if API_AUTH_TOKEN:
                 self.send_header("Set-Cookie", "tripy_session=" + API_AUTH_TOKEN + "; Path=/; HttpOnly; SameSite=Lax; Secure")
             self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
-        static = {"/tripy-icon.png": (ROOT / "tripy-icon.png", "image/png"), "/manifest.webmanifest": (ROOT / "manifest.webmanifest", "application/manifest+json")}
+        static = {"/tripy-icon.png": (ROOT / "tripy-icon.png", "image/png"), "/manifest.webmanifest": (ROOT / "manifest.webmanifest", "application/manifest+json"), "/service-worker.js": (ROOT / "service-worker.js", "application/javascript; charset=utf-8")}
         if path in static:
             file_path, content_type = static[path]
             if file_path.exists():
@@ -1800,6 +1883,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         if not self._authorized(path): return
+        if self.path == "/api/push/subscribe":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                save_push_subscription(payload)
+                self._json(201, {"subscribed": True}); return
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                self._json(400, {"error": "invalid_push_subscription"}); return
         if self.path == "/api/intake/email":
             if not EMAIL_INTAKE_SECRET:
                 self._json(503, {"error": "email_intake_not_configured"}); return
