@@ -64,7 +64,8 @@ class EmailIngestionTests(unittest.TestCase):
             try:
                 record, duplicate = server.store_incoming_email(message.as_bytes())
                 self.assertFalse(duplicate)
-                context = server.email_attachment_text_context(record)
+                candidates = server.email_attachment_candidates(record)
+                context = server.email_attachment_text_context(record, exclude_path=candidates[0][0])
                 self.assertIn('Passenger train ICE 701', context)
                 self.assertIn('Berlin to Munich', context)
             finally:

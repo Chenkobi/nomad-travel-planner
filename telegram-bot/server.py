@@ -766,13 +766,16 @@ def prepare_email_source(record):
     return stored, target
 
 
-def email_attachment_text_context(record, max_chars=30000):
-    """Collect bounded text from all readable attachments for cross-file extraction."""
+def email_attachment_text_context(record, max_chars=30000, exclude_path=None):
+    """Collect bounded text from readable non-primary attachments for cross-file extraction."""
     parts = []
     remaining = max(0, int(max_chars))
+    excluded = Path(exclude_path).resolve() if exclude_path else None
     for source, attachment in email_attachment_candidates(record):
         if remaining <= 0:
             break
+        if excluded and source.resolve() == excluded:
+            continue
         suffix = Path(str(attachment.get("filename") or source.name)).suffix.lower()
         try:
             if suffix in {".html", ".htm"} or attachment.get("content_type") == "text/html":
@@ -952,7 +955,7 @@ def process_incoming_email(record):
             byte_size = 0
         extracted_text_length = len(extract_pdf_text(path) or "")
         update_email_stage(intake_id, "extracting")
-        attachment_context = email_attachment_text_context(record)
+        attachment_context = email_attachment_text_context(record, exclude_path=path)
         ai = gemini_extract(path, mime_type=mime_type, supplemental_text=attachment_context) or {}
         if not ai:
             final_record_status = "needs_review"
