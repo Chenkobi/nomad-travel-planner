@@ -156,11 +156,20 @@ TEL AVIV YAFO    BATUMI    LY5113    05:15    08:30
                     "documents": [],
                 }])
                 source = root / "elal.txt"
-                source.write_text("""SUNDOR
+                source.write_text("""Departure
+TEL AVIV YAFO
+BATUMI
+BATUMI/GE
+LY5113
+05:15
+Arrival
+08:30
+EL AL ON BEHALF OF SUN DOR
+SUNDOR
 EL AL GROUP
-From    To    Flight    Departure    Arrival
-TEL AVIV YAFO    BATUMI    LY5113    05:15    08:30
-23OCT2026""", encoding="utf-8")
+From To Flight Departure Arrival
+TEL AVIV YAFO BATUMI LY5113 05:15 08:30
+BEN GURION INTL BATUMI/GE 230CT2026 230CT2026""", encoding="utf-8")
                 ai = {"type": "flight", "status": "confirmed", "segments": [{"airline": "Sundor", "flight_number": "LY5113", "departure_date": "2026-10-23"}]}
                 trip = server.create_trip_from_document("elal.txt", source, source="Email", ai_override=ai)
                 self.assertEqual(len(trip["flights"]), 1)

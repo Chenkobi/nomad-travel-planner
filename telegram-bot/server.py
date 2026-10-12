@@ -719,7 +719,8 @@ def normalize_flight_fields(ai, text=""):
     if len(origin_values) > 1 or len(destination_values) > 1:
         result["origin"] = ""
         result["destination"] = ""
-    route_pairs = re.findall(r"(?im)^\s*([A-Za-z][A-Za-z .'-]{1,30}?)\s+(?:to|→)\s+([A-Za-z][A-Za-z .'-]{1,30}?)\s*$", source)
+    route_source = "\n".join(line for line in raw_lines if not all(marker in line.casefold() for marker in ("from", "to", "flight", "departure", "arrival")))
+    route_pairs = re.findall(r"(?im)^\s*([A-Za-z][A-Za-z .'-]{1,30}?)\s+(?:to|→)\s+([A-Za-z][A-Za-z .'-]{1,30}?)\s*$", route_source)
     route_pairs = _unique_values((f"{a.strip()} → {b.strip()}" for a, b in route_pairs), str.casefold)
     if len(route_pairs) == 1 and (not result.get("origin") or not result.get("destination")):
         origin, destination = route_pairs[0].split(" → ", 1)
@@ -743,6 +744,44 @@ def normalize_flight_fields(ai, text=""):
             result["flight_number"] = _normalize_flight_number(columns[2])
             result["departure_time"] = columns[3]
             result["arrival_time"] = columns[4]
+            break
+
+    flight_code = str(result.get("flight_number") or "").strip()
+    compact_code = ""
+    if flight_code:
+        compact_code = re.escape(flight_code).replace(r"\ ", r"\s*")
+        for line in raw_lines:
+            times_in_line = re.findall(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b", line)
+            code_match = re.search(rf"(?<![A-Z0-9]){compact_code}(?!\d)", line, re.I)
+            if not code_match or len(times_in_line) < 2:
+                continue
+            if not result.get("departure_time"):
+                result["departure_time"] = times_in_line[-2].zfill(5)
+            if not result.get("arrival_time"):
+                result["arrival_time"] = times_in_line[-1].zfill(5)
+            prefix = line[:code_match.start()].strip()
+            origin = str(result.get("origin") or "").strip()
+            if origin and not result.get("destination") and prefix.casefold().startswith(origin.casefold() + " "):
+                result["destination"] = prefix[len(origin):].strip()
+            break
+
+    if not result.get("origin"):
+        for index, line in enumerate(raw_lines[:-1]):
+            if line.casefold() == "departure" and raw_lines[index + 1].casefold() not in {"arrival", "from", "to"}:
+                result["origin"] = raw_lines[index + 1]
+                break
+
+    if result.get("origin") and not result.get("destination") and flight_code:
+        for line in raw_lines:
+            code_match = re.search(rf"(?<![A-Z0-9]){compact_code}(?!\\d)", line, re.I)
+            if not code_match:
+                continue
+            prefix = line[:code_match.start()].strip()
+            if not prefix:
+                continue
+            origin = str(result["origin"]).strip()
+            if prefix.casefold().startswith(origin.casefold() + " "):
+                result["destination"] = prefix[len(origin):].strip()
             break
 
     set_if_missing("departure_date", _label_values(source, ("departure date", "date", "תאריך יציאה")), _normalize_explicit_date)
