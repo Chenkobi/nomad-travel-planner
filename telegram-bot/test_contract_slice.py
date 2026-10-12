@@ -23,6 +23,40 @@ class ContractSliceTests(unittest.TestCase):
         self.assertEqual(normalized["trip_id"], "trip-1")
         self.assertEqual(normalized["kind"], "attraction")
 
+    def test_derived_rental_events_are_idempotent_across_api_reads(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                server.DATA = root / "events.json"
+                server.TRIPS = root / "trips.json"
+                server.UPLOADS = root / "uploads"
+                server.save_events([])
+                server.save_trips([{
+                    "id": "trip-1",
+                    "title": "Switzerland",
+                    "start": "2026-09-28",
+                    "end": "2026-10-01",
+                    "destinations": [],
+                    "hotels": [],
+                    "rentals": [{
+                        "pickup_date": "2026-09-28",
+                        "pickup_time": "15:00",
+                        "pickup_location": "Zurich HB",
+                        "vehicle_type": "Jeep Compass",
+                        "dropoff_date": "2026-10-01",
+                        "dropoff_time": "14:00",
+                        "dropoff_location": "Basel Airport",
+                    }],
+                }])
+                first = server.ensure_hotel_events()
+                second = server.ensure_hotel_events()
+                self.assertEqual(len(first), 2)
+                self.assertEqual(len(second), 2)
+                self.assertEqual(len({(event[2], event[6], event[4]) for event in second}), 2)
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old
+
     def test_document_content_type_follows_file_extension(self):
         self.assertEqual(server.document_content_type(Path("booking.txt")), "text/plain; charset=utf-8")
         self.assertEqual(server.document_content_type(Path("booking.html")), "text/html; charset=utf-8")

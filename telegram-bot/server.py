@@ -1556,8 +1556,8 @@ def ensure_hotel_events():
         event_date = str(event[6] if len(event) > 6 else "")
         trip_id = str(event[9]) if len(event) > 9 else ""
         key = (trip_id, str(event[2]), event_date, str(event[4] if len(event) > 4 else ""))
-        if not trip_id or key not in seen:
-            if trip_id: seen.add(key)
+        if key not in seen:
+            seen.add(key)
             cleaned.append(event)
     events = cleaned
     changed = len(events) != before
@@ -1657,19 +1657,19 @@ def ensure_hotel_events():
                     events.insert(0, event_as_legacy_list(base_event, event_trip_id)); seen.add(key); changed = True
         for rental in trip.get("rentals", []):
             if rental.get("pickup_date") and rental.get("pickup_time") and rental.get("pickup_location"):
-                key = ("איסוף רכב · " + str(rental.get("vehicle_type") or "רכב"), str(rental["pickup_date"]))
+                key = (event_trip_id, "איסוף רכב · " + str(rental.get("vehicle_type") or "רכב"), str(rental["pickup_date"]), "רכב")
                 if key not in seen:
-                    events.insert(0, [rental["pickup_time"], "🚗", key[0], f"{rental['pickup_location']} · שעה {rental['pickup_time']}", "רכב", "Telegram", rental["pickup_date"], rental["pickup_location"]]); seen.add(key); changed = True
+                    events.insert(0, event_as_legacy_list([rental["pickup_time"], "🚗", key[1], f"{rental['pickup_location']} · שעה {rental['pickup_time']}", "רכב", "Telegram", rental["pickup_date"], rental["pickup_location"]], event_trip_id)); seen.add(key); changed = True
             if rental.get("dropoff_date") and rental.get("dropoff_time") and rental.get("dropoff_location"):
-                key = ("החזרת רכב · " + str(rental.get("vehicle_type") or "רכב"), str(rental["dropoff_date"]))
+                key = (event_trip_id, "החזרת רכב · " + str(rental.get("vehicle_type") or "רכב"), str(rental["dropoff_date"]), "רכב")
                 if key not in seen:
-                    events.insert(0, [rental["dropoff_time"], "🚗", key[0], f"{rental['dropoff_location']} · שעה {rental['dropoff_time']}", "רכב", "Telegram", rental["dropoff_date"], rental["dropoff_location"]]); seen.add(key); changed = True
+                    events.insert(0, event_as_legacy_list([rental["dropoff_time"], "🚗", key[1], f"{rental['dropoff_location']} · שעה {rental['dropoff_time']}", "רכב", "Telegram", rental["dropoff_date"], rental["dropoff_location"]], event_trip_id)); seen.add(key); changed = True
         for restaurant in trip.get("restaurants", []):
             if restaurant.get("date") and restaurant.get("time"):
                 location = restaurant.get("address") or restaurant.get("location") or ""
-                key = ("מסעדה · " + str(restaurant.get("name") or "מסעדה"), str(restaurant["date"]))
+                key = (event_trip_id, "מסעדה · " + str(restaurant.get("name") or "מסעדה"), str(restaurant["date"]), "מסעדה")
                 if key not in seen:
-                    events.insert(0, [restaurant["time"], "🍽️", key[0], location or "הזמנת מסעדה", "מסעדה", "Email", restaurant["date"], location]); seen.add(key); changed = True
+                    events.insert(0, event_as_legacy_list([restaurant["time"], "🍽️", key[1], location or "הזמנת מסעדה", "מסעדה", "Email", restaurant["date"], location], event_trip_id)); seen.add(key); changed = True
     if trips_changed: save_trips(trips)
     if changed: save_events(events)
     return events
