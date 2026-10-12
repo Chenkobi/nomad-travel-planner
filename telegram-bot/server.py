@@ -1315,7 +1315,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
     if doc_type == "other":
         raise ValueError("document type not recognized; send a clearer screenshot or PDF")
     if doc_type == "flight":
-        flight_segments = normalize_flight_segments(ai, "")
+        flight_segments = normalize_flight_segments(ai, text)
         def valid_date(value):
             try:
                 return bool(re.fullmatch(r"20\d{2}-\d{2}-\d{2}", value)) and datetime.fromisoformat(value).date().isoformat() == value

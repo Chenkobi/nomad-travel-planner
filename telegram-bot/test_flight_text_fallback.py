@@ -134,6 +134,44 @@ TEL AVIV YAFO    BATUMI    LY5113    05:15    08:30
         self.assertEqual(result[0]["departure_time"], "05:15")
         self.assertEqual(result[0]["arrival_time"], "08:30")
 
+    def test_create_trip_completes_single_incomplete_gemini_segment_from_source_text(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                server.DATA, server.TRIPS, server.UPLOADS = root / "events.json", root / "trips.json", root / "uploads"
+                server.save_events([])
+                server.save_trips([{
+                    "id": "georgia-trip",
+                    "title": "Georgia",
+                    "start": "2026-10-23",
+                    "end": "2026-10-26",
+                    "destinations": [],
+                    "hotels": [],
+                    "flights": [],
+                    "trains": [],
+                    "attractions": [],
+                    "rentals": [],
+                    "restaurants": [],
+                    "documents": [],
+                }])
+                source = root / "elal.txt"
+                source.write_text("""SUNDOR
+EL AL GROUP
+From    To    Flight    Departure    Arrival
+TEL AVIV YAFO    BATUMI    LY5113    05:15    08:30
+23OCT2026""", encoding="utf-8")
+                ai = {"type": "flight", "status": "confirmed", "segments": [{"airline": "Sundor", "flight_number": "LY5113", "departure_date": "2026-10-23"}]}
+                trip = server.create_trip_from_document("elal.txt", source, source="Email", ai_override=ai)
+                self.assertEqual(len(trip["flights"]), 1)
+                self.assertEqual(trip["flights"][0]["number"], "LY5113")
+                self.assertEqual(trip["flights"][0]["origin"], "TEL AVIV YAFO")
+                self.assertEqual(trip["flights"][0]["destination"], "BATUMI")
+                self.assertEqual(trip["flights"][0]["departure_time"], "05:15")
+                self.assertEqual(trip["flights"][0]["arrival_time"], "08:30")
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old
+
     def test_create_trip_persists_each_explicit_segment_as_flat_flight_record(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
