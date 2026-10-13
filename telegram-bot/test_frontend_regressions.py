@@ -20,13 +20,25 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertNotIn("מתעדכן מאישורי Telegram", INDEX)
         self.assertIn("מתעדכן מאישורי מייל", INDEX)
 
-    def test_currency_converter_has_currency_style_controls(self):
-        self.assertIn('class="currency-app"', INDEX)
-        self.assertIn('id="addCurrencyFromConverter"', INDEX)
-        self.assertIn('id="refreshRates"', INDEX)
-        self.assertIn('class="number-pad"', INDEX)
-        self.assertIn('data-currency="ILS"', INDEX)
+    def test_trip_centered_navigation_has_tools_sheet_and_current_day_logic(self):
+        self.assertIn('id="openTripTools"', INDEX)
+        self.assertIn('id="tripToolsModal"', INDEX)
+        self.assertIn("function initialDayIndex()", INDEX)
+        self.assertIn("if(today>last)return 0", INDEX)
+        self.assertIn("if(today===last)return days.length-1", INDEX)
 
+    def test_currency_is_full_screen_and_direct_input(self):
+        self.assertIn('class="panel hidden currency-screen"', INDEX)
+        self.assertIn('id="closeCurrency"', INDEX)
+        self.assertIn('הקלידו ישירות בכל שורה', INDEX)
+        self.assertIn("function updateFromMoneyInput(input)", INDEX)
+        self.assertIn('value="PLN"', INDEX)
+        self.assertIn('value="GEL"', INDEX)
+
+    def test_push_flow_handles_existing_subscription_and_ios(self):
+        self.assertIn("navigator.serviceWorker.ready", INDEX)
+        self.assertIn("getSubscription()", INDEX)
+        self.assertIn("באייפון צריך להוסיף את TRIPY למסך הבית", INDEX)
 
 if __name__ == "__main__":
     unittest.main()
