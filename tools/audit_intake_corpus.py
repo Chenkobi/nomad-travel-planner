@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 import subprocess
 import sys
@@ -27,6 +29,19 @@ def read_text(path: Path) -> str:
         return ""
 
 
+def read_headers(path: Path) -> dict[str, list[str]]:
+    try:
+        with path.open("rb") as handle:
+            message = BytesParser(policy=policy.default).parse(handle)
+        return {
+            "received": [str(value) for value in message.get_all("Received", [])],
+            "from": [str(value) for value in message.get_all("From", [])],
+            "reply_to": [str(value) for value in message.get_all("Reply-To", [])],
+        }
+    except (OSError, ValueError):
+        return {"received": [], "from": [], "reply_to": []}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("intake_dir", type=Path)
@@ -36,12 +51,14 @@ def main() -> int:
     provider_counts = Counter()
     category_counts = Counter()
     intent_counts = Counter()
+    unresolved_reason_counts = Counter()
     unresolved = []
 
     for record in records:
         folder = args.intake_dir / str(record["id"])
         body = read_text(folder / "body.txt")
         html = read_text(folder / "body.html")
+        headers = read_headers(folder / str(record.get("source_file") or "source.eml"))
         attachment_names = " ".join(str(item.get("filename") or "") for item in record.get("attachments") or [])
         attachment_text = []
         for item in record.get("attachments") or []:
@@ -58,7 +75,15 @@ def main() -> int:
                         attachment_text.append(result.stdout)
                 except (OSError, subprocess.SubprocessError):
                     pass
-        source_text = "\n".join((body, html, attachment_names, *attachment_text))
+        source_text = "\n".join((
+            body,
+            html,
+            attachment_names,
+            *attachment_text,
+            *headers["received"],
+            *headers["from"],
+            *headers["reply_to"],
+        ))
         provider = identify_email_provider(
             sender=str(record.get("from") or ""),
             reply_to=str(record.get("reply_to") or ""),
@@ -69,9 +94,20 @@ def main() -> int:
         category = provider["category_hint"] if provider["category_hint"] != "marketplace" else None
         category = category or infer_extended_type({}, source_text) or "unknown"
         category_counts[category] += 1
-        intent = classify_email_intent(str(record.get("subject") or ""), body + "\n" + html)
+        intent = classify_email_intent(
+            str(record.get("subject") or ""),
+            "\n".join((body, html, *attachment_text, *headers["received"], *headers["from"])),
+        )
         intent_counts[intent] += 1
-        if provider["provider"] == "unknown" or category == "unknown" or intent == "unknown":
+        reasons = []
+        if provider["provider"] == "unknown":
+            reasons.append("provider_unknown")
+        if category == "unknown":
+            reasons.append("category_unknown")
+        if intent == "unknown":
+            reasons.append("intent_unknown")
+        unresolved_reason_counts.update(reasons)
+        if reasons:
             unresolved.append({"id_suffix": str(record["id"])[-8:], "provider": provider["provider"], "category": category, "intent": intent})
 
     print(json.dumps({
@@ -79,6 +115,7 @@ def main() -> int:
         "provider_counts": dict(provider_counts),
         "category_counts": dict(category_counts),
         "intent_counts": dict(intent_counts),
+        "unresolved_reason_counts": dict(unresolved_reason_counts),
         "unresolved_count": len(unresolved),
         "unresolved": unresolved,
     }, ensure_ascii=False, indent=2, sort_keys=True))

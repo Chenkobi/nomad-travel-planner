@@ -58,7 +58,7 @@ _PROVIDER_RULES: tuple[dict[str, Any], ...] = (
         "provider": "marriott",
         "category_hint": "hotel",
         "domains": ("marriott.com", "res-marriott.com"),
-        "markers": ("marriott",),
+        "markers": ("marriott", "sheraton"),
     },
     {
         "provider": "klm",
@@ -120,7 +120,8 @@ def identify_email_provider(sender: str = "", reply_to: str = "", subject: str =
     ``marketplace`` category hint so the document facts decide hotel/flight/etc.
     """
     sender_domains = _sender_domains(sender, reply_to)
-    text = " ".join((str(subject or ""), str(body or ""))).casefold()
+    subject_text = str(subject or "").casefold()
+    body_text = str(body or "").casefold()
     candidates: list[tuple[int, dict[str, Any], list[str]]] = []
 
     for rule in _PROVIDER_RULES:
@@ -131,7 +132,11 @@ def identify_email_provider(sender: str = "", reply_to: str = "", subject: str =
                 score += 100
                 evidence.append(f"sender_domain:{domain}")
         for marker in rule["markers"]:
-            if marker.casefold() in text:
+            marker_text = marker.casefold()
+            if marker_text in subject_text:
+                score += 20
+                evidence.append(f"subject:{marker}")
+            if marker_text in body_text:
                 score += 10
                 evidence.append(f"text:{marker}")
         if score:
