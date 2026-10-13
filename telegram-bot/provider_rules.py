@@ -60,6 +60,30 @@ _PROVIDER_RULES: tuple[dict[str, Any], ...] = (
         "domains": ("marriott.com", "res-marriott.com"),
         "markers": ("marriott",),
     },
+    {
+        "provider": "klm",
+        "category_hint": "flight",
+        "domains": ("klm.com",),
+        "markers": ("klm", "royal dutch airlines"),
+    },
+    {
+        "provider": "avis",
+        "category_hint": "car_rental",
+        "domains": ("avis.com", "avis.co.il"),
+        "markers": ("avis",),
+    },
+    {
+        "provider": "hertz",
+        "category_hint": "car_rental",
+        "domains": ("hertz.com", "hertz.co.il"),
+        "markers": ("hertz",),
+    },
+    {
+        "provider": "agoda",
+        "category_hint": "marketplace",
+        "domains": ("agoda.com",),
+        "markers": ("agoda",),
+    },
 )
 
 

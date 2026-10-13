@@ -33,6 +33,20 @@ class EmailIntentTests(unittest.TestCase):
         self.assertEqual(result["provider"], "wizz_air")
         self.assertEqual(result["category_hint"], "flight")
 
+    def test_provider_identity_detects_klm_and_hertz(self):
+        airline = identify_email_provider(
+            sender="booking@klm.com",
+            subject="KLM itinerary confirmation",
+        )
+        rental = identify_email_provider(
+            sender="reservations@hertz.com",
+            subject="Hertz rental reservation",
+        )
+        self.assertEqual(airline["provider"], "klm")
+        self.assertEqual(airline["category_hint"], "flight")
+        self.assertEqual(rental["provider"], "hertz")
+        self.assertEqual(rental["category_hint"], "car_rental")
+
     def test_provider_hint_fills_missing_type_without_overwriting_extracted_type(self):
         self.assertEqual(
             apply_provider_hint({}, {"category_hint": "car_rental"})["type"],
