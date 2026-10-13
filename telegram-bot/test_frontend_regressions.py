@@ -10,7 +10,10 @@ class FrontendRegressionTests(unittest.TestCase):
     def test_notification_bell_has_visible_panel_toggle_handler(self):
         self.assertIn("#notificationsButton", INDEX)
         self.assertIn("#notificationPanel", INDEX)
-        self.assertTrue("classList.toggle('show')" in INDEX or 'classList.toggle("show")' in INDEX)
+        self.assertIn("closeNotifications", INDEX)
+        self.assertIn("notificationPanel.classList.add('show')", INDEX)
+        self.assertIn("notificationPanel.classList.remove('show')", INDEX)
+        self.assertIn("#closeNotifications", INDEX)
 
     def test_dark_modal_scrollbar_is_not_white(self):
         self.assertIn("scrollbar-color", INDEX)
