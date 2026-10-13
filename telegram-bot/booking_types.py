@@ -58,6 +58,37 @@ INSURANCE_MARKERS = (
     "מוקד חירום",
 )
 
+FLIGHT_FACT_MARKERS = (
+    "flight number",
+    "departure airport",
+    "arrival airport",
+    "boarding pass",
+    "flight itinerary",
+    "טיסת",
+    "מספר טיסה",
+)
+
+HOTEL_FACT_MARKERS = (
+    "hotel reservation",
+    "hotel booking",
+    "check-in date",
+    "check-out date",
+    "room type",
+    "guest name",
+    "accommodation details",
+    "הזמנת מלון",
+)
+
+ATTRACTION_MARKERS = (
+    "museum ticket",
+    "admission ticket",
+    "guided tour",
+    "attraction reservation",
+    "single ticket",
+    "כרטיס כניסה",
+    "סיור מודרך",
+)
+
 
 def infer_extended_type(ai: dict[str, Any] | None, text: str = "") -> str | None:
     ai = ai or {}
@@ -71,6 +102,12 @@ def infer_extended_type(ai: dict[str, Any] | None, text: str = "") -> str | None
         return "restaurant"
     if any(marker in lowered for marker in INSURANCE_MARKERS):
         return "insurance"
+    if any(marker in lowered for marker in FLIGHT_FACT_MARKERS):
+        return "flight"
+    if any(marker in lowered for marker in HOTEL_FACT_MARKERS):
+        return "hotel"
+    if any(marker in lowered for marker in ATTRACTION_MARKERS):
+        return "attraction"
     if any(marker in lowered for marker in TRAIN_MARKERS):
         return "train"
     if any(provider in lowered for provider in CAR_RENTAL_PROVIDER_MARKERS) and any(marker in lowered for marker in CAR_RENTAL_FACT_MARKERS):

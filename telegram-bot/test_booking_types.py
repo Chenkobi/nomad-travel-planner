@@ -33,6 +33,24 @@ class BookingTypesTests(unittest.TestCase):
             "restaurant",
         )
 
+    def test_explicit_flight_facts_are_detected_without_provider_name(self):
+        self.assertEqual(
+            infer_extended_type({}, "Flight number LX123. Departure airport ZRH."),
+            "flight",
+        )
+
+    def test_explicit_hotel_facts_are_detected_without_provider_name(self):
+        self.assertEqual(
+            infer_extended_type({}, "Hotel reservation. Check-in date and room type."),
+            "hotel",
+        )
+
+    def test_explicit_attraction_facts_are_detected_without_provider_name(self):
+        self.assertEqual(
+            infer_extended_type({}, "Museum ticket and guided tour reservation."),
+            "attraction",
+        )
+
     def test_insurance_summary_keeps_only_source_fields(self):
         value = normalize_insurance({
             "insurer": "TravelSafe",
