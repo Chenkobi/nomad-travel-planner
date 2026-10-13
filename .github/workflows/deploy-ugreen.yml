@@ -29,6 +29,9 @@ jobs:
       - name: Run tests before deployment
         run: python3 -m unittest discover -s telegram-bot -p 'test_*.py' -q
 
+      - name: Audit live email corpus (aggregate only)
+        run: python3 tools/audit_intake_corpus.py /home/Kobic101/tripy-email
+
       - name: Build release image
         env:
           RELEASE_TAG: tripy-bot:${{ github.sha }}
