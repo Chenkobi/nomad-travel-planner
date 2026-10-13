@@ -10,6 +10,7 @@ import argparse
 import json
 from collections import Counter
 from pathlib import Path
+import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,16 @@ def main() -> int:
             suffix = Path(str(item.get("filename") or "")).suffix.lower()
             if item.get("content_type") == "text/html" or suffix in {".html", ".htm"}:
                 attachment_text.append(read_text(folder / str(item.get("path") or "")))
+            elif suffix == ".pdf":
+                try:
+                    result = subprocess.run(
+                        ["pdftotext", str(folder / str(item.get("path") or "")), "-"],
+                        capture_output=True, text=True, timeout=20,
+                    )
+                    if result.returncode == 0:
+                        attachment_text.append(result.stdout)
+                except (OSError, subprocess.SubprocessError):
+                    pass
         source_text = "\n".join((body, html, attachment_names, *attachment_text))
         provider = identify_email_provider(
             sender=str(record.get("from") or ""),
