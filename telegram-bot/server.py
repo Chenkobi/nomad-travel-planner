@@ -606,6 +606,7 @@ def apply_review_decision(intake_id, decision, overrides=None):
     trip = next((item for item in trips if str(item.get("id")) == str(record.get("trip_id"))), None)
     kind = allowed.get("type") or str(record.get("ingested_type") or "").strip().lower()
     collection = {"flight": "flights", "hotel": "hotels", "train": "trains", "attraction": "attractions"}.get(kind)
+    applied = False
     if trip and collection:
         candidates = trip.get(collection, []) or []
         target = next((item for item in candidates if str(item.get("source_email_id")) == str(intake_id) or item.get("document") == record.get("document")), None)
@@ -624,11 +625,15 @@ def apply_review_decision(intake_id, decision, overrides=None):
                 target["supplier"] = allowed["supplier"]
             target["status"] = "confirmed"
             target["review_decision"] = "approved"
+            applied = True
             save_trips(trips)
         elif kind == "flight" and all(allowed.get(key) for key in ("date", "time", "from", "to")):
             # A human-approved flight can be added only from explicitly entered fields.
             trip.setdefault("flights", []).append({"source_email_id": intake_id, "airline": allowed.get("supplier") or record.get("provider") or "", "departure_date": allowed["date"], "departure_time": allowed["time"], "origin": allowed["from"], "destination": allowed["to"], "status": "confirmed", "review_decision": "approved"})
+            applied = True
             save_trips(trips)
+    if not applied:
+        record = update_email_record(intake_id, status="needs_review", review_decision="saved", review_reason="אישור לא בוצע: אין אירוע מזוהה או פרטי טיסה מלאים.") or record
     return record
 
 
