@@ -55,6 +55,22 @@ class EmailIntentTests(unittest.TestCase):
         )
         self.assertEqual(result["provider"], "marriott")
 
+    def test_provider_identity_detects_insurance_and_rail_suppliers(self):
+        insurance = identify_email_provider(
+            sender="policy@harel-ins.co.il",
+            subject="Travel insurance policy",
+            body="Harel travel insurance policy details",
+        )
+        rail = identify_email_provider(
+            sender="booking@bahn.de",
+            subject="DB Bahn ticket",
+            body="Deutsche Bahn train ticket",
+        )
+        self.assertEqual(insurance["provider"], "harel")
+        self.assertEqual(insurance["category_hint"], "insurance")
+        self.assertEqual(rail["provider"], "deutsche_bahn")
+        self.assertEqual(rail["category_hint"], "train")
+
     def test_provider_hint_fills_missing_type_without_overwriting_extracted_type(self):
         self.assertEqual(
             apply_provider_hint({}, {"category_hint": "car_rental"})["type"],

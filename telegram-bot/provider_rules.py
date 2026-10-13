@@ -84,6 +84,18 @@ _PROVIDER_RULES: tuple[dict[str, Any], ...] = (
         "domains": ("agoda.com",),
         "markers": ("agoda",),
     },
+    {
+        "provider": "harel",
+        "category_hint": "insurance",
+        "domains": ("harel-ins.co.il", "harel.co.il"),
+        "markers": ("harel", "הראל", "travel insurance"),
+    },
+    {
+        "provider": "deutsche_bahn",
+        "category_hint": "train",
+        "domains": ("bahn.de", "deutschebahn.com"),
+        "markers": ("deutsche bahn", "db bahn", "bahn.de"),
+    },
 )
 
 
