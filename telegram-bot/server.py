@@ -2065,6 +2065,25 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(201, {"subscribed": True}); return
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 self._json(400, {"error": "invalid_push_subscription"}); return
+        if self.path == "/api/trips":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(payload, dict) or not str(payload.get("title") or "").strip():
+                    self._json(400, {"error": "trip_title_required"}); return
+                trip_id = str(payload.get("id") or f"web-{int(time.time() * 1000)}").strip()[:120]
+                allowed = {"id": trip_id, "title": str(payload.get("title") or "").strip()[:180], "start": str(payload.get("start") or "")[:10], "end": str(payload.get("end") or "")[:10], "days": payload.get("days") or 0, "source": str(payload.get("source") or "Web")[:40]}
+                for key in ("hotels", "flights", "trains", "attractions", "rentals"):
+                    if isinstance(payload.get(key), list): allowed[key] = payload[key]
+                trips = load_trips()
+                existing = next((trip for trip in trips if str(trip.get("id")) == trip_id), None)
+                if existing:
+                    existing.update(allowed); saved = existing; status = 200
+                else:
+                    trips.append(allowed); saved = allowed; status = 201
+                save_trips(trips); self._json(status, {"trip": saved}); return
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                self._json(400, {"error": "invalid_trip"}); return
         if self.path == "/api/intake/email":
             if not EMAIL_INTAKE_SECRET:
                 self._json(503, {"error": "email_intake_not_configured"}); return

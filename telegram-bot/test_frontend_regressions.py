@@ -62,5 +62,14 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertIn("f.schedule_departure_date||f.departure_date||f.date||f.start", INDEX)
         self.assertIn("f.flight_number", INDEX)
 
+    def test_remote_trip_sync_does_not_overwrite_local_trips_when_server_is_empty(self):
+        self.assertIn("data.trips.length===0&&localSnapshot.length", INDEX)
+        self.assertIn("/api/trips',{method:'POST'", INDEX)
+
+    def test_server_trip_creation_endpoint_is_present(self):
+        server = (ROOT / "telegram-bot" / "server.py").read_text(encoding="utf-8")
+        self.assertIn('if self.path == "/api/trips":', server)
+        self.assertIn('trip_title_required', server)
+
 if __name__ == "__main__":
     unittest.main()
