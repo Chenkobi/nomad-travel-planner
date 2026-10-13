@@ -15,6 +15,22 @@ class EmailIntentTests(unittest.TestCase):
         self.assertEqual(result["category_hint"], "marketplace")
         self.assertGreaterEqual(result["confidence"], 0.9)
 
+    def test_current_subject_beats_stale_forwarded_provider_markers(self):
+        result = identify_email_provider(
+            sender="forwarder@kobichen.com",
+            subject="SIXT rental reservation",
+            body="Previous KLM itinerary confirmation and a forwarded Sheraton thread",
+        )
+        self.assertEqual(result["provider"], "sixt")
+
+    def test_sheraton_is_classified_as_marriott_family_hotel(self):
+        result = identify_email_provider(
+            sender="forwarder@kobichen.com",
+            subject="Sheraton reservation confirmation",
+        )
+        self.assertEqual(result["provider"], "marriott")
+        self.assertEqual(result["category_hint"], "hotel")
+
     def test_provider_identity_detects_sixt_and_car_rental(self):
         result = identify_email_provider(
             sender="noreply@sixt.com",
