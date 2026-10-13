@@ -16,6 +16,10 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertIn("scrollbar-color", INDEX)
         self.assertIn(".dark .modal", INDEX)
 
+    def test_email_is_the_visible_intake_channel(self):
+        self.assertNotIn("מתעדכן מאישורי Telegram", INDEX)
+        self.assertIn("מתעדכן מאישורי מייל", INDEX)
+
 
 if __name__ == "__main__":
     unittest.main()
