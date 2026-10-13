@@ -6,6 +6,7 @@ from booking_lifecycle import (
     cancel_booking,
     enrich_booking_lifecycle,
     find_booking_matches,
+    replace_booking,
     validate_date_range,
 )
 
@@ -71,6 +72,23 @@ class BookingLifecycleTests(unittest.TestCase):
         self.assertEqual(booking["status"], "confirmed")
         self.assertEqual(booking["lifecycle_status"], "confirmed")
         self.assertEqual(booking["lifecycle_history"][0]["status"], "confirmed")
+
+    def test_replace_booking_supersedes_old_record_and_preserves_history(self):
+        match = find_booking_matches(self.trips, {"confirmation_number": "ABC123"})[0]
+        replacement = {
+            "name": "Hotel One",
+            "start": "2026-10-11",
+            "end": "2026-10-13",
+            "supplier": "Example Travel",
+            "confirmation_number": "NEW456",
+        }
+        self.assertTrue(replace_booking(self.trips, match, "hotel", replacement, "email-2"))
+        hotels = self.trips[0]["hotels"]
+        self.assertEqual(hotels[0]["status"], "superseded")
+        self.assertEqual(hotels[0]["superseded_by_email"], "email-2")
+        self.assertEqual(hotels[1]["confirmation_number"], "NEW456")
+        self.assertEqual(hotels[1]["status"], "confirmed")
+        self.assertEqual(hotels[1]["supersedes_confirmation_number"], "ABC123")
 
 
 if __name__ == "__main__":

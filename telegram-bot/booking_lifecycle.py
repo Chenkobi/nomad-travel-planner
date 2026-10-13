@@ -10,7 +10,7 @@ COLLECTIONS = {
     "car_rental": "rentals",
     "restaurant": "restaurants",
 }
-LIFECYCLE_STATUSES = {"confirmed", "modified", "cancelled", "refunded"}
+LIFECYCLE_STATUSES = {"confirmed", "modified", "cancelled", "refunded", "superseded"}
 
 
 class BookingDateError(ValueError):
@@ -147,4 +147,24 @@ def cancel_booking(trips, match, source_email_id, status="cancelled"):
         return False
     enrich_booking_lifecycle(record, record.get("source", "Email"), status=status, source_email_id=source_email_id)
     record["cancelled_by_email"] = source_email_id
+    return True
+
+
+def replace_booking(trips, match, kind, replacement, source_email_id):
+    """Supersede one matched booking and append its replacement atomically in-memory."""
+    old = match.get("record") if match else None
+    trip = match.get("trip") if match else None
+    collection = COLLECTIONS.get(kind)
+    if not old or not trip or not collection:
+        return False
+    if old.get("superseded_by_email") == source_email_id:
+        return True
+    old_confirmation = old.get("confirmation_number")
+    enrich_booking_lifecycle(old, old.get("source", "Email"), status="superseded", source_email_id=source_email_id)
+    old["superseded_by_email"] = source_email_id
+    new_record = dict(replacement or {})
+    if old_confirmation and not new_record.get("supersedes_confirmation_number"):
+        new_record["supersedes_confirmation_number"] = old_confirmation
+    enrich_booking_lifecycle(new_record, new_record.get("source", "Email"), status="confirmed", source_email_id=source_email_id)
+    trip.setdefault(collection, []).append(new_record)
     return True
