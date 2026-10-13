@@ -113,3 +113,14 @@ def identify_email_provider(sender: str = "", reply_to: str = "", subject: str =
         "confidence": confidence,
         "evidence": evidence,
     }
+
+
+def apply_provider_hint(ai: dict[str, Any] | None, provider: dict[str, Any]) -> dict[str, Any]:
+    """Fill only an absent/unknown type; never overwrite extracted facts."""
+    result = dict(ai or {})
+    current = str(result.get("type") or "").strip().casefold()
+    hint = str(provider.get("category_hint") or "").strip().casefold()
+    if current in {"", "unknown", "other"} and hint in {"flight", "hotel", "car_rental"}:
+        result["type"] = hint
+        result["type_source"] = "provider_hint"
+    return result

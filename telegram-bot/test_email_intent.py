@@ -1,7 +1,7 @@
 import unittest
 
 import server
-from provider_rules import identify_email_provider
+from provider_rules import apply_provider_hint, identify_email_provider
 
 
 class EmailIntentTests(unittest.TestCase):
@@ -32,6 +32,16 @@ class EmailIntentTests(unittest.TestCase):
         )
         self.assertEqual(result["provider"], "wizz_air")
         self.assertEqual(result["category_hint"], "flight")
+
+    def test_provider_hint_fills_missing_type_without_overwriting_extracted_type(self):
+        self.assertEqual(
+            apply_provider_hint({}, {"category_hint": "car_rental"})["type"],
+            "car_rental",
+        )
+        self.assertEqual(
+            apply_provider_hint({"type": "hotel"}, {"category_hint": "car_rental"})["type"],
+            "hotel",
+        )
 
     def test_ai_status_is_authoritative_over_policy_words(self):
         self.assertEqual(
