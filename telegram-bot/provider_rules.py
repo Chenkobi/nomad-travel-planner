@@ -10,7 +10,7 @@ _PROVIDER_RULES: tuple[dict[str, Any], ...] = (
         "provider": "booking.com",
         "category_hint": "marketplace",
         "domains": ("booking.com",),
-        "markers": ("booking.com", "booking confirmation"),
+        "markers": ("booking.com",),
     },
     {
         "provider": "trip.com",

@@ -47,6 +47,14 @@ class EmailIntentTests(unittest.TestCase):
         self.assertEqual(rental["provider"], "hertz")
         self.assertEqual(rental["category_hint"], "car_rental")
 
+    def test_specific_hotel_brand_beats_generic_booking_confirmation(self):
+        result = identify_email_provider(
+            sender="forwarder@kobichen.com",
+            subject="Reservation Confirmation",
+            body="Marriott Bonvoy booking confirmation and check-in details",
+        )
+        self.assertEqual(result["provider"], "marriott")
+
     def test_provider_hint_fills_missing_type_without_overwriting_extracted_type(self):
         self.assertEqual(
             apply_provider_hint({}, {"category_hint": "car_rental"})["type"],
