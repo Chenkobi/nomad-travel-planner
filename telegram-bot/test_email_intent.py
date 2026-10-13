@@ -1,7 +1,7 @@
 import unittest
 
 import server
-from provider_rules import apply_provider_hint, identify_email_provider
+from provider_rules import apply_provider_hint, enrich_ai_with_provider, identify_email_provider
 
 
 class EmailIntentTests(unittest.TestCase):
@@ -42,6 +42,15 @@ class EmailIntentTests(unittest.TestCase):
             apply_provider_hint({"type": "hotel"}, {"category_hint": "car_rental"})["type"],
             "hotel",
         )
+
+    def test_provider_enrichment_adds_supplier_only_for_non_marketplaces(self):
+        result = enrich_ai_with_provider(
+            {}, {"provider": "sixt", "category_hint": "car_rental"}
+        )
+        self.assertEqual(result["supplier"], "sixt")
+        self.assertNotIn("supplier", enrich_ai_with_provider(
+            {}, {"provider": "booking.com", "category_hint": "marketplace"}
+        ))
 
     def test_ai_status_is_authoritative_over_policy_words(self):
         self.assertEqual(

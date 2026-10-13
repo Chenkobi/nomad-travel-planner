@@ -31,7 +31,7 @@ from booking_lifecycle import (
 from booking_types import infer_extended_type, normalize_insurance
 from event_contract import event_as_legacy_list, event_identity
 from email_rules import classify_email_intent, looks_like_travel_email
-from provider_rules import apply_provider_hint, identify_email_provider
+from provider_rules import enrich_ai_with_provider, identify_email_provider
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.getenv("TRIPY_DATA_FILE", ROOT / "trip-data.json"))
@@ -1139,7 +1139,7 @@ def process_incoming_email(record):
         attachment_context = email_attachment_text_context(record, exclude_path=path)
         ai = gemini_extract(path, mime_type=mime_type, supplemental_text=attachment_context) or {}
         if ai:
-            ai = apply_provider_hint(ai, provider_info)
+            ai = enrich_ai_with_provider(ai, provider_info)
         if not ai:
             final_record_status = "needs_review"
             validation_error_code = "provider_unavailable"

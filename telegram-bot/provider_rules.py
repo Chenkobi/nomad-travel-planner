@@ -124,3 +124,15 @@ def apply_provider_hint(ai: dict[str, Any] | None, provider: dict[str, Any]) -> 
         result["type"] = hint
         result["type_source"] = "provider_hint"
     return result
+
+
+def enrich_ai_with_provider(ai: dict[str, Any] | None, provider: dict[str, Any]) -> dict[str, Any]:
+    """Apply safe provider-derived fields while preserving extracted values."""
+    result = apply_provider_hint(ai, provider)
+    provider_name = str(provider.get("provider") or "").strip()
+    category = str(provider.get("category_hint") or "").strip().casefold()
+    if provider_name and provider_name != "unknown" and category != "marketplace":
+        if not str(result.get("supplier") or "").strip():
+            result["supplier"] = provider_name
+            result["supplier_source"] = "provider_identity"
+    return result
