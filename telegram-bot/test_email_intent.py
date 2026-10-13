@@ -1,9 +1,38 @@
 import unittest
 
 import server
+from provider_rules import identify_email_provider
 
 
 class EmailIntentTests(unittest.TestCase):
+    def test_provider_identity_prefers_sender_domain_over_generic_booking_words(self):
+        result = identify_email_provider(
+            sender="confirmation@booking.com",
+            subject="Your reservation confirmation",
+            body="Hotel reservation confirmation",
+        )
+        self.assertEqual(result["provider"], "booking.com")
+        self.assertEqual(result["category_hint"], "marketplace")
+        self.assertGreaterEqual(result["confidence"], 0.9)
+
+    def test_provider_identity_detects_sixt_and_car_rental(self):
+        result = identify_email_provider(
+            sender="noreply@sixt.com",
+            subject="Your SIXT reservation",
+            body="Pickup location and vehicle category",
+        )
+        self.assertEqual(result["provider"], "sixt")
+        self.assertEqual(result["category_hint"], "car_rental")
+
+    def test_provider_identity_detects_airline_from_forwarded_body(self):
+        result = identify_email_provider(
+            sender="forwarder@kobichen.com",
+            subject="Fwd: Flight confirmation",
+            body="From: noreply@wizzair.com\nWizz Air flight confirmation",
+        )
+        self.assertEqual(result["provider"], "wizz_air")
+        self.assertEqual(result["category_hint"], "flight")
+
     def test_ai_status_is_authoritative_over_policy_words(self):
         self.assertEqual(
             server.intent_from_ai(

@@ -17,6 +17,39 @@ class EmailIngestionTests(unittest.TestCase):
         server.EMAIL_INDEX = Path(tmp) / 'index.json'
         return old_dir, old_index
 
+    def test_incoming_email_persists_provider_identity(self):
+        message = EmailMessage()
+        message['From'] = 'confirmation@booking.com'
+        message['Subject'] = 'Your reservation confirmation'
+        message.set_content('Hotel reservation confirmation')
+        with TemporaryDirectory() as tmp:
+            old_dir, old_index = self._configure_temp_email_dir(tmp)
+            try:
+                record, duplicate = server.store_incoming_email(message.as_bytes())
+                self.assertFalse(duplicate)
+                self.assertEqual(record['provider'], 'booking.com')
+                self.assertEqual(record['provider_category_hint'], 'marketplace')
+                self.assertGreaterEqual(record['provider_confidence'], 0.9)
+            finally:
+                server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index
+
+    def test_incoming_email_uses_attachment_filename_for_provider_identity(self):
+        message = EmailMessage()
+        message['From'] = 'forwarder@kobichen.com'
+        message['Received'] = 'from mail.sixt.com by intake.example'
+        message['Subject'] = 'Booking details'
+        message.set_content('See attached confirmation.')
+        message.add_attachment(b'%PDF-1.4 test', maintype='application', subtype='pdf', filename='sixt-reservation.pdf')
+        with TemporaryDirectory() as tmp:
+            old_dir, old_index = self._configure_temp_email_dir(tmp)
+            try:
+                record, duplicate = server.store_incoming_email(message.as_bytes())
+                self.assertFalse(duplicate)
+                self.assertEqual(record['provider'], 'sixt')
+                self.assertEqual(record['provider_category_hint'], 'car_rental')
+            finally:
+                server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index
+
     def test_html_email_is_converted_to_source_text(self):
         message = EmailMessage()
         message['Subject'] = 'Reservation confirmation'

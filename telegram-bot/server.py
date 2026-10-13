@@ -31,6 +31,7 @@ from booking_lifecycle import (
 from booking_types import infer_extended_type, normalize_insurance
 from event_contract import event_as_legacy_list, event_identity
 from email_rules import classify_email_intent, looks_like_travel_email
+from provider_rules import identify_email_provider
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.getenv("TRIPY_DATA_FILE", ROOT / "trip-data.json"))
@@ -401,9 +402,21 @@ def store_incoming_email(raw):
             elif part.get_content_type() == "text/html":
                 try: html_body.append(part.get_content())
                 except (LookupError, TypeError): html_body.append(content.decode(part.get_content_charset() or "utf-8", errors="replace"))
-        (folder / "body.txt").write_text("\n\n".join(text_body), encoding="utf-8")
-        (folder / "body.html").write_text("\n\n".join(html_body), encoding="utf-8")
-        record = {"id": intake_id, "status": "received", "source": "Email", "dedupe_key": dedupe_key, "sha256": digest, "message_id": message_id, "from": decode_email_header(message.get("From")), "to": decode_email_header(message.get("To")), "subject": decode_email_header(message.get("Subject")), "date": decode_email_header(message.get("Date")), "received_at": datetime.now(timezone.utc).isoformat(), "source_file": f"{intake_id}/source.eml", "body_file": f"{intake_id}/body.txt", "attachments": attachments}
+        body_text = "\n\n".join(text_body)
+        body_html = "\n\n".join(html_body)
+        (folder / "body.txt").write_text(body_text, encoding="utf-8")
+        (folder / "body.html").write_text(body_html, encoding="utf-8")
+        sender = decode_email_header(message.get("From"))
+        reply_to = decode_email_header(message.get("Reply-To"))
+        subject = decode_email_header(message.get("Subject"))
+        provider_source = "\n".join((
+            body_text,
+            html_to_text(body_html),
+            " ".join(str(item.get("filename") or "") for item in attachments),
+            "\n".join(message.get_all("Received", [])),
+        ))
+        provider = identify_email_provider(sender=sender, reply_to=reply_to, subject=subject, body=provider_source)
+        record = {"id": intake_id, "status": "received", "source": "Email", "dedupe_key": dedupe_key, "sha256": digest, "message_id": message_id, "from": sender, "to": decode_email_header(message.get("To")), "reply_to": reply_to, "subject": subject, "date": decode_email_header(message.get("Date")), "received_at": datetime.now(timezone.utc).isoformat(), "source_file": f"{intake_id}/source.eml", "body_file": f"{intake_id}/body.txt", "attachments": attachments, "provider": provider["provider"], "provider_category_hint": provider["category_hint"], "provider_confidence": provider["confidence"], "provider_evidence": provider["evidence"]}
         items = load_email_index(); items.insert(0, record); save_email_index(items)
         return record, False
 
@@ -1080,6 +1093,20 @@ def process_incoming_email(record):
         update_email_stage(intake_id, "reading")
         subject = str(record.get("subject") or "")
         body = email_body_text(record)
+        attachment_names = " ".join(str(item.get("filename") or "") for item in record.get("attachments") or [])
+        provider_info = identify_email_provider(
+            sender=str(record.get("from") or ""),
+            reply_to=str(record.get("reply_to") or ""),
+            subject=subject,
+            body="\n".join((body, attachment_names)),
+        )
+        update_email_record(
+            intake_id,
+            provider=provider_info["provider"],
+            provider_category_hint=provider_info["category_hint"],
+            provider_confidence=provider_info["confidence"],
+            provider_evidence=provider_info["evidence"],
+        )
         update_email_stage(intake_id, "preparing_source")
         prepared = prepare_email_source(record)
         if not prepared:
@@ -1118,6 +1145,10 @@ def process_incoming_email(record):
             if TOKEN and ALLOWED_CHAT:
                 send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
             return record
+        provider_hint = str(provider_info.get("category_hint") or "").strip()
+        ai_type = str(ai.get("type") or "").strip().lower()
+        if provider_info.get("confidence", 0) >= 0.8 and provider_hint in _TELEMETRY_TYPES and ai_type in {"", "other"}:
+            ai["type"] = provider_hint
         intent = intent_from_ai(ai, subject, body)
         telemetry_type = _telemetry_choice(ai.get("type"), _TELEMETRY_TYPES, "other")
         telemetry_status = _telemetry_choice(ai.get("status"), _TELEMETRY_STATUSES, "unknown")
@@ -1152,7 +1183,14 @@ def process_incoming_email(record):
         try:
             persisted_trip = find_email_trip(filename)
             had_persisted_trip = bool(persisted_trip)
-            context_text = "\n".join((subject, str(record.get("from") or ""), str(record.get("to") or ""), body))
+            context_text = "\n".join((
+                f"Provider: {provider_info.get('provider', 'unknown')}",
+                f"Provider category hint: {provider_info.get('category_hint', 'unknown')}",
+                subject,
+                str(record.get("from") or ""),
+                str(record.get("to") or ""),
+                body,
+            ))
             trip = persisted_trip or create_trip_from_document(filename, path, "Email", ai_override=ai, context_text=context_text)
             persisted_trips = load_trips()
             persisted_trip = next((item for item in persisted_trips if str(item.get("id")) == str(trip.get("id"))), trip)
@@ -1905,7 +1943,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/push/vapid-public-key": self._json(200, {"public_key": vapid_public_key()}); return
         if path == "/api/notifications": self._json(200, {"notifications": load_notifications(), "unread": len(load_notifications())}); return
         if path == "/api/intake/email":
-            fields = ("id", "status", "intent", "subject", "from", "to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "extraction_telemetry", "ingested_type", "trip_id", "review_reason", "attachments")
+            fields = ("id", "status", "intent", "subject", "from", "to", "reply_to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "extraction_telemetry", "provider", "provider_category_hint", "provider_confidence", "provider_evidence", "ingested_type", "trip_id", "review_reason", "attachments")
             emails = [{key: record.get(key) for key in fields} for record in load_email_index()]
             self._json(200, {"emails": emails}); return
         if path == "/api/intake/telegram":
