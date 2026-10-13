@@ -52,6 +52,8 @@ def main() -> int:
     category_counts = Counter()
     intent_counts = Counter()
     unresolved_reason_counts = Counter()
+    unresolved_attachment_counts = Counter()
+    persisted_review_reason_counts = Counter()
     unresolved = []
 
     for record in records:
@@ -108,6 +110,15 @@ def main() -> int:
             reasons.append("intent_unknown")
         unresolved_reason_counts.update(reasons)
         if reasons:
+            formats = tuple(sorted(
+                Path(str(item.get("filename") or "")).suffix.lower()
+                or str(item.get("content_type") or "unknown")
+                for item in record.get("attachments") or []
+            )) or ("none",)
+            unresolved_attachment_counts.update(formats)
+            persisted_reason = str(record.get("review_reason") or "").split(":", 1)[0].strip()
+            if persisted_reason:
+                persisted_review_reason_counts[persisted_reason] += 1
             unresolved.append({"id_suffix": str(record["id"])[-8:], "provider": provider["provider"], "category": category, "intent": intent})
 
     print(json.dumps({
@@ -116,6 +127,8 @@ def main() -> int:
         "category_counts": dict(category_counts),
         "intent_counts": dict(intent_counts),
         "unresolved_reason_counts": dict(unresolved_reason_counts),
+        "unresolved_attachment_counts": dict(unresolved_attachment_counts),
+        "persisted_review_reason_counts": dict(persisted_review_reason_counts),
         "unresolved_count": len(unresolved),
         "unresolved": unresolved,
     }, ensure_ascii=False, indent=2, sort_keys=True))
