@@ -16,6 +16,7 @@ env:
   CONTAINER_NAME: tripy-bot
   ENV_FILE: /home/Kobic101/tripy-bot/.env
   DATA_VOLUME: /home/Kobic101/tripy-data:/app/data
+  DATA_DIR: /home/Kobic101/tripy-data
   UPLOADS_VOLUME: /home/Kobic101/tripy-uploads:/app/uploads
   EMAIL_VOLUME: /home/Kobic101/tripy-email:/app/email
 
@@ -54,12 +55,23 @@ jobs:
               --name "$CONTAINER_NAME" \
               --restart unless-stopped \
               --env-file "$ENV_FILE" \
+              -e TRIPY_DATA_FILE=/app/data/trip-data.json \
+              -e TRIPY_UPLOAD_DIR=/app/uploads \
+              -e TRIPY_EMAIL_DIR=/app/email \
               -p 8787:8787 \
               -v "$DATA_VOLUME" \
               -v "$UPLOADS_VOLUME" \
               -v "$EMAIL_VOLUME" \
               "$1"
           }
+
+          mkdir -p "$DATA_DIR"
+          if [[ ! -s "$DATA_DIR/trips.json" ]] && docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+            docker cp "$CONTAINER_NAME:/app/data/trips.json" "$DATA_DIR/trips.json" >/dev/null 2>&1 || true
+            if [[ ! -s "$DATA_DIR/trips.json" ]]; then
+              docker cp "$CONTAINER_NAME:/app/trips.json" "$DATA_DIR/trips.json" >/dev/null 2>&1 || true
+            fi
+          fi
 
           docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
           run_release "$RELEASE_TAG" >/dev/null
