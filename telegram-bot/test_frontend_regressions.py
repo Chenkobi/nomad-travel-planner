@@ -20,6 +20,13 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertNotIn("מתעדכן מאישורי Telegram", INDEX)
         self.assertIn("מתעדכן מאישורי מייל", INDEX)
 
+    def test_currency_converter_has_currency_style_controls(self):
+        self.assertIn('class="currency-app"', INDEX)
+        self.assertIn('id="addCurrencyFromConverter"', INDEX)
+        self.assertIn('id="refreshRates"', INDEX)
+        self.assertIn('class="number-pad"', INDEX)
+        self.assertIn('data-currency="ILS"', INDEX)
+
 
 if __name__ == "__main__":
     unittest.main()
