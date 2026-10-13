@@ -23,6 +23,14 @@ class EmailIntentTests(unittest.TestCase):
         )
         self.assertEqual(result["provider"], "sixt")
 
+    def test_forwarded_header_domain_is_used_when_outer_sender_is_user(self):
+        result = identify_email_provider(
+            sender="Kobi Chen <kobi@kobichen.com>",
+            subject="Fwd: Reservation confirmation",
+            body="From: reservations@marriott.com\nSubject: Your hotel reservation",
+        )
+        self.assertEqual(result["provider"], "marriott")
+
     def test_sheraton_is_classified_as_marriott_family_hotel(self):
         result = identify_email_provider(
             sender="forwarder@kobichen.com",

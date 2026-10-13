@@ -112,6 +112,16 @@ def _sender_domains(*values: str) -> set[str]:
     return domains
 
 
+def _forwarded_header_domains(body: str) -> set[str]:
+    """Extract domains only from header-like lines inside forwarded mail."""
+    domains: set[str] = set()
+    for line in str(body or "").splitlines():
+        if not re.match(r"^\s*(?:from|reply-to|sender|received)\s*:", line, re.I):
+            continue
+        domains.update(_sender_domains(line))
+    return domains
+
+
 def identify_email_provider(sender: str = "", reply_to: str = "", subject: str = "", body: str = "") -> dict[str, Any]:
     """Identify the booking provider before document classification.
 
@@ -120,6 +130,7 @@ def identify_email_provider(sender: str = "", reply_to: str = "", subject: str =
     ``marketplace`` category hint so the document facts decide hotel/flight/etc.
     """
     sender_domains = _sender_domains(sender, reply_to)
+    forwarded_domains = _forwarded_header_domains(body)
     subject_text = str(subject or "").casefold()
     body_text = str(body or "").casefold()
     candidates: list[tuple[int, dict[str, Any], list[str]]] = []
@@ -131,6 +142,9 @@ def identify_email_provider(sender: str = "", reply_to: str = "", subject: str =
             if domain in sender_domains:
                 score += 100
                 evidence.append(f"sender_domain:{domain}")
+            elif domain in forwarded_domains:
+                score += 60
+                evidence.append(f"forwarded_header_domain:{domain}")
         for marker in rule["markers"]:
             marker_text = marker.casefold()
             if marker_text in subject_text:
