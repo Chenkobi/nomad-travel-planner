@@ -1103,11 +1103,12 @@ def process_incoming_email(record):
         subject = str(record.get("subject") or "")
         body = email_body_text(record)
         attachment_names = " ".join(str(item.get("filename") or "") for item in record.get("attachments") or [])
+        attachment_context_for_provider = email_attachment_text_context(record)
         provider_info = identify_email_provider(
             sender=str(record.get("from") or ""),
             reply_to=str(record.get("reply_to") or ""),
             subject=subject,
-            body="\n".join((body, attachment_names)),
+            body="\n".join((body, attachment_names, attachment_context_for_provider)),
         )
         update_email_record(
             intake_id,
