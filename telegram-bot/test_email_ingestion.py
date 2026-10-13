@@ -50,6 +50,25 @@ class EmailIngestionTests(unittest.TestCase):
             finally:
                 server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index
 
+    def test_incoming_email_uses_html_attachment_for_provider_identity(self):
+        message = EmailMessage()
+        message['From'] = 'forwarder@kobichen.com'
+        message['Subject'] = 'Reservation details'
+        message.set_content('See attached document.')
+        message.add_attachment(
+            b'<html><body>Marriott Bonvoy Reservation Confirmation</body></html>',
+            maintype='text', subtype='html', filename='reservation.html'
+        )
+        with TemporaryDirectory() as tmp:
+            old_dir, old_index = self._configure_temp_email_dir(tmp)
+            try:
+                record, duplicate = server.store_incoming_email(message.as_bytes())
+                self.assertFalse(duplicate)
+                self.assertEqual(record['provider'], 'marriott')
+                self.assertEqual(record['provider_category_hint'], 'hotel')
+            finally:
+                server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index
+
     def test_html_email_is_converted_to_source_text(self):
         message = EmailMessage()
         message['Subject'] = 'Reservation confirmation'

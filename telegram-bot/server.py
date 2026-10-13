@@ -409,10 +409,19 @@ def store_incoming_email(raw):
         sender = decode_email_header(message.get("From"))
         reply_to = decode_email_header(message.get("Reply-To"))
         subject = decode_email_header(message.get("Subject"))
+        attachment_text = []
+        for item in attachments:
+            suffix = Path(str(item.get("filename") or "")).suffix.lower()
+            if item.get("content_type") == "text/html" or suffix in {".html", ".htm"}:
+                try:
+                    attachment_text.append(html_to_text((folder / str(item["path"])).read_text(encoding="utf-8", errors="replace")))
+                except (OSError, UnicodeError):
+                    pass
         provider_source = "\n".join((
             body_text,
             html_to_text(body_html),
             " ".join(str(item.get("filename") or "") for item in attachments),
+            "\n".join(attachment_text),
             "\n".join(message.get_all("Received", [])),
         ))
         provider = identify_email_provider(sender=sender, reply_to=reply_to, subject=subject, body=provider_source)
