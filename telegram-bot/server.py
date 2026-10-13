@@ -950,6 +950,15 @@ def intent_from_ai(ai, subject="", body=""):
     status_map = {"confirmed": "confirmed", "modified": "modified", "cancelled": "cancelled", "refunded": "refunded"}
     if status in status_map:
         return status_map[status]
+
+    # Gemini may extract the booking facts but omit lifecycle status. Recover
+    # only from explicit message language; generic policy/footer words remain
+    # review-only rather than becoming a guessed confirmation.
+    text = " ".join((str(subject or ""), str(body or ""))).casefold()
+    if re.search(r"\b(?:cancelled|canceled|voided|refund(?:ed)?|rescheduled|rebooked|reservation (?:was )?changed|booking (?:was )?changed)\b", text):
+        return classify_email_intent(subject, body)
+    if re.search(r"\b(?:reservation|booking)\s+(?:is\s+)?confirmed\b|\bconfirmed\s+(?:reservation|booking)\b|\bconfirmation\s+(?:number|code)\b", text):
+        return "confirmed"
     return "unknown"
 
 

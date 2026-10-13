@@ -34,6 +34,16 @@ class EmailIntentTests(unittest.TestCase):
             'refunded',
         )
 
+    def test_missing_ai_status_uses_clear_email_confirmation(self):
+        self.assertEqual(
+            server.intent_from_ai(
+                {'type': 'hotel'},
+                'Reservation confirmation',
+                'Your reservation is confirmed. Check-in is on 12 June 2026.',
+            ),
+            'confirmed',
+        )
+
     def test_missing_ai_status_is_review_not_a_guess(self):
         self.assertEqual(
             server.intent_from_ai(
