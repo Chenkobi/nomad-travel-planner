@@ -584,6 +584,54 @@ def update_email_record(intake_id, **changes):
     return None
 
 
+def apply_review_decision(intake_id, decision, overrides=None):
+    """Apply an explicit human review without deleting the source booking."""
+    overrides = overrides if isinstance(overrides, dict) else {}
+    allowed = {key: str(overrides.get(key) or "").strip()[:160] for key in ("type", "date", "time", "from", "to", "supplier") if str(overrides.get(key) or "").strip()}
+    with LOCK:
+        items = load_email_index()
+        record = next((item for item in items if str(item.get("id")) == str(intake_id)), None)
+        if not record:
+            return None
+        record["review_decision"] = "approved" if decision == "approve" else "saved"
+        record["review_overrides"] = allowed
+        if decision == "approve":
+            record["status"] = "processed"
+            record["review_reason"] = ""
+            record["processed_at"] = _utc_now().isoformat()
+        save_email_index(items)
+    if decision != "approve":
+        return record
+    trips = load_trips()
+    trip = next((item for item in trips if str(item.get("id")) == str(record.get("trip_id"))), None)
+    kind = allowed.get("type") or str(record.get("ingested_type") or "").strip().lower()
+    collection = {"flight": "flights", "hotel": "hotels", "train": "trains", "attraction": "attractions"}.get(kind)
+    if trip and collection:
+        candidates = trip.get(collection, []) or []
+        target = next((item for item in candidates if str(item.get("source_email_id")) == str(intake_id) or item.get("document") == record.get("document")), None)
+        if target:
+            if allowed.get("date"):
+                date_key = {"flight": "departure_date", "hotel": "start", "train": "date", "attraction": "date"}[kind]
+                target[date_key] = allowed["date"]
+            if allowed.get("time"):
+                time_key = {"flight": "departure_time", "hotel": "checkin_time", "train": "time", "attraction": "time"}[kind]
+                target[time_key] = allowed["time"]
+            if kind == "flight":
+                if allowed.get("from"): target["origin"] = allowed["from"]
+                if allowed.get("to"): target["destination"] = allowed["to"]
+                if allowed.get("supplier"): target["airline"] = allowed["supplier"]
+            elif allowed.get("supplier"):
+                target["supplier"] = allowed["supplier"]
+            target["status"] = "confirmed"
+            target["review_decision"] = "approved"
+            save_trips(trips)
+        elif kind == "flight" and all(allowed.get(key) for key in ("date", "time", "from", "to")):
+            # A human-approved flight can be added only from explicitly entered fields.
+            trip.setdefault("flights", []).append({"source_email_id": intake_id, "airline": allowed.get("supplier") or record.get("provider") or "", "departure_date": allowed["date"], "departure_time": allowed["time"], "origin": allowed["from"], "destination": allowed["to"], "status": "confirmed", "review_decision": "approved"})
+            save_trips(trips)
+    return record
+
+
 def email_record_folder(record):
     return EMAIL_DIR / str(record.get("id"))
 
@@ -1943,7 +1991,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200 if ready else 503, {"status": "ready" if ready else "starting", "http": HTTP_READY, "email": EMAIL_READY, "telegram": telegram_status()}); return
         if path == "/api/rates":
             try:
-                request = urllib.request.Request("https://api.frankfurter.dev/v2/rates?base=ILS&quotes=USD,GBP,EUR,CHF,CAD,AUD,JPY,HUF,INR", headers={"Accept":"application/json", "User-Agent":"TRIPY/1.0"})
+                request = urllib.request.Request("https://api.frankfurter.dev/v2/rates?base=ILS&quotes=USD,GBP,EUR,CHF,CAD,AUD,JPY,HUF,INR,PLN,CZK,TRY,RON,BGN,AED,GEL", headers={"Accept":"application/json", "User-Agent":"TRIPY/1.0"})
                 with urllib.request.urlopen(request, timeout=15) as response: raw_rates = json.loads(response.read())
                 if not isinstance(raw_rates, list) or not raw_rates: raise ValueError("empty_rates")
                 normalized = {str(row["quote"]): 1 / float(row["rate"]) for row in raw_rates if row.get("quote") and float(row.get("rate", 0)) > 0}
@@ -1986,6 +2034,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         if not self._authorized(path): return
+        if self.path == "/api/intake/review":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                decision = str(payload.get("decision") or "save").strip().lower()
+                if decision not in {"approve", "save"} or not payload.get("id"):
+                    self._json(400, {"error": "invalid_review"}); return
+                updated = apply_review_decision(str(payload["id"]), decision, payload.get("overrides"))
+                if not updated:
+                    self._json(404, {"error": "intake_not_found"}); return
+                self._json(200, {"reviewed": True, "record": {"id": updated.get("id"), "status": updated.get("status"), "review_decision": updated.get("review_decision")}}); return
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                self._json(400, {"error": "invalid_review"}); return
+        if self.path == "/api/push/test":
+            sent = send_push_notification("TRIPY · בדיקת התראות", "אם אתה רואה את ההודעה הזו, התראות הטלפון עובדות.", tag="tripy-push-test")
+            self._json(200, {"sent": sent, "subscriptions": len(_load_json_list(PUSH_SUBSCRIPTIONS)), "webpush_available": _webpush is not None})
+            return
+
         if self.path == "/api/push/subscribe":
             try:
                 length = int(self.headers.get("Content-Length", "0"))

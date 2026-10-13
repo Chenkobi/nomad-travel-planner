@@ -38,7 +38,29 @@ class FrontendRegressionTests(unittest.TestCase):
     def test_push_flow_handles_existing_subscription_and_ios(self):
         self.assertIn("navigator.serviceWorker.ready", INDEX)
         self.assertIn("getSubscription()", INDEX)
+        self.assertIn("/api/push/test", INDEX)
         self.assertIn("באייפון צריך להוסיף את TRIPY למסך הבית", INDEX)
+
+    def test_review_center_allows_approval_and_edits(self):
+        self.assertIn('id="reviewModal"', INDEX)
+        self.assertIn('id="approveReview"', INDEX)
+        self.assertIn("/api/intake/review", INDEX)
+        self.assertIn("מרכז אישורים", INDEX)
+
+    def test_booking_events_use_schedule_overrides_not_source_deletion(self):
+        self.assertIn("schedule_checkin_time", INDEX)
+        self.assertIn("schedule_checkin_hidden", INDEX)
+        self.assertIn("saveTypedTripChange(target,{[target.hiddenField]:true})", INDEX)
+
+    def test_currency_editor_is_inside_converter_and_selects_input(self):
+        self.assertIn('id="currencyEditor"', INDEX)
+        self.assertIn('id="currencyEditorSelect"', INDEX)
+        self.assertIn("input.addEventListener('focus',()=>input.select())", INDEX)
+        self.assertIn("data-currency-up", INDEX)
+
+    def test_flight_date_fallbacks_are_rendered(self):
+        self.assertIn("f.schedule_departure_date||f.departure_date||f.date||f.start", INDEX)
+        self.assertIn("f.flight_number", INDEX)
 
 if __name__ == "__main__":
     unittest.main()
