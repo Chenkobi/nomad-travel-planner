@@ -86,6 +86,27 @@ class AuthShareTests(unittest.TestCase):
         self.assertEqual(list(json.loads(scoped.read()),), ["trip"])
         self.assertEqual(self.request(f"/api/share/{token}").status, 404)
 
+    @unittest.skipUnless(server.generate_registration_options, "webauthn dependency unavailable")
+    def test_passkey_registration_options_are_challenge_bound(self):
+        self.request("/api/auth/setup", method="POST", payload={"setup_token": "setup-test-token", "username": "owner", "password": "a-long-test-password"})
+        login = self.request("/api/auth/login", method="POST", payload={"username": "owner", "password": "a-long-test-password"})
+        session = self.cookie_header(login, server.SESSION_COOKIE)
+        response = self.request("/api/auth/passkey/register/options", method="POST", payload={}, cookie=session)
+        self.assertEqual(response.status, 200)
+        options = json.loads(response.read())
+        self.assertIn("challenge", options)
+        self.assertIn("rp", options)
+        self.assertIn("user", options)
+        stored = json.loads(server.AUTH_STORE.read_text())
+        self.assertEqual(stored["webauthn_challenges"]["registration"]["challenge"], options["challenge"])
+
+    @unittest.skipUnless(server.verify_authentication_response, "webauthn dependency unavailable")
+    def test_passkey_assertion_cannot_be_accepted_without_verification(self):
+        self.request("/api/auth/setup", method="POST", payload={"setup_token": "setup-test-token", "username": "owner", "password": "a-long-test-password"})
+        response = self.request("/api/auth/passkey/authenticate", method="POST", payload={"credential": {"id": "fake", "response": {}}})
+        self.assertIn(response.status, (400, 401))
+        self.assertNotIn("Set-Cookie", response.headers)
+
 
 if __name__ == "__main__":
     unittest.main()

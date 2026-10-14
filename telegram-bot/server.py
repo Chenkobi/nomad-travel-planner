@@ -16,6 +16,16 @@ try:
 except ImportError:
     _webpush = None
 try:
+    from webauthn import (generate_authentication_options, generate_registration_options,
+                          options_to_json, verify_authentication_response,
+                          verify_registration_response)
+    from webauthn.helpers.cose import COSEAlgorithmIdentifier
+    from webauthn.helpers.structs import AuthenticatorSelectionCriteria, PublicKeyCredentialDescriptor, UserVerificationRequirement
+except ImportError:
+    generate_authentication_options = generate_registration_options = None
+    options_to_json = verify_authentication_response = verify_registration_response = None
+    COSEAlgorithmIdentifier = AuthenticatorSelectionCriteria = PublicKeyCredentialDescriptor = UserVerificationRequirement = None
+try:
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 except ImportError:
@@ -45,6 +55,9 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 EMAIL_INTAKE_SECRET = os.getenv("TRIPY_INTAKE_SECRET", "").strip()
 API_AUTH_TOKEN = os.getenv("TRIPY_API_AUTH_TOKEN", "").strip()
 API_ALLOWED_ORIGIN = os.getenv("TRIPY_API_ALLOWED_ORIGIN", "https://trip.atlasim.co.il").strip()
+WEBAUTHN_RP_ID = os.getenv("TRIPY_WEBAUTHN_RP_ID", "trip.atlasim.co.il").strip()
+WEBAUTHN_RP_NAME = os.getenv("TRIPY_WEBAUTHN_RP_NAME", "TRIPY").strip()
+WEBAUTHN_ORIGIN = os.getenv("TRIPY_WEBAUTHN_ORIGIN", "https://trip.atlasim.co.il").strip()
 EMAIL_DIR = Path(os.getenv("TRIPY_EMAIL_DIR", ROOT / "trip-email"))
 EMAIL_INDEX = EMAIL_DIR / "index.json"
 AUTH_STORE = EMAIL_DIR / "auth.json"
@@ -157,7 +170,8 @@ def api_requires_auth(path):
     """Protect private API data while leaving health, auth, rates and intake public."""
     return path.startswith("/api/") and path not in (
         "/api/rates", "/api/intake/email", "/api/auth/setup", "/api/auth/login",
-        "/api/auth/me", "/api/auth/logout", "/api/share/me",
+        "/api/auth/me", "/api/auth/logout", "/api/auth/passkey/authenticate",
+        "/api/auth/passkey/authenticate/options", "/api/share/me",
     ) and not path.startswith("/api/share/")
 
 
@@ -193,6 +207,30 @@ def _username_matches(username, record):
     expected = str(record.get("username", "")).strip().casefold()
     supplied = str(username or "").strip().casefold()
     return bool(expected and supplied and hmac.compare_digest(supplied, expected))
+
+
+def _webauthn_available():
+    return bool(generate_registration_options and verify_registration_response)
+
+
+def _b64(value):
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _unb64(value):
+    text = str(value or "")
+    return base64.urlsafe_b64decode(text.encode("ascii") + b"=" * (-len(text) % 4))
+
+
+def _webauthn_challenges(store):
+    return store.setdefault("webauthn_challenges", {})
+
+
+def _passkey_unavailable(handler):
+    if not _webauthn_available():
+        handler._json(503, {"error": "passkeys_unavailable"})
+        return True
+    return False
 
 
 def _cookie_value(headers, name):
@@ -2395,6 +2433,74 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         if not self._authorized(path): return
+        if path in ("/api/auth/passkey/register/options", "/api/auth/passkey/register"):
+            if _passkey_unavailable(self): return
+            if not _session_user(self.headers):
+                self._json(401, {"error": "unauthorized"}); return
+            try:
+                length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}")
+                store = _auth_json(AUTH_STORE); user = store.get("user") or {}
+                if path.endswith("/options"):
+                    existing = [PublicKeyCredentialDescriptor(id=_unb64(item["credential_id"])) for item in user.get("passkeys", [])]
+                    options = generate_registration_options(
+                        rp_id=WEBAUTHN_RP_ID, rp_name=WEBAUTHN_RP_NAME,
+                        user_name=str(user.get("username") or "owner"),
+                        user_display_name=str(user.get("username") or "owner"),
+                        user_id=hashlib.sha256(str(user.get("username")).encode()).digest(),
+                        challenge=secrets.token_bytes(32),
+                        exclude_credentials=existing,
+                    )
+                    serialized = json.loads(options_to_json(options))
+                    session_value = _cookie_value(self.headers, SESSION_COOKIE)
+                    _webauthn_challenges(store)["registration"] = {"challenge": serialized["challenge"], "expires_at": time.time() + 300, "session_hash": hashlib.sha256(session_value.encode()).hexdigest()}
+                    _save_auth_json(AUTH_STORE, store)
+                    self._json(200, serialized); return
+                challenge = _webauthn_challenges(store).pop("registration", None)
+                current_session = _cookie_value(self.headers, SESSION_COOKIE)
+                if not challenge or float(challenge.get("expires_at", 0)) <= time.time() or not hmac.compare_digest(str(challenge.get("session_hash", "")), hashlib.sha256(current_session.encode()).hexdigest()):
+                    _save_auth_json(AUTH_STORE, store); self._json(400, {"error": "challenge_expired"}); return
+                verified = verify_registration_response(
+                    credential=payload.get("credential"), expected_challenge=_unb64(challenge["challenge"]),
+                    expected_rp_id=WEBAUTHN_RP_ID, expected_origin=WEBAUTHN_ORIGIN,
+                )
+                user.setdefault("passkeys", []).append({"credential_id": _b64(verified.credential_id), "public_key": _b64(verified.credential_public_key), "sign_count": verified.sign_count, "created_at": time.time()})
+                _save_auth_json(AUTH_STORE, store)
+                self._json(201, {"registered": True}); return
+            except Exception:
+                self._json(400, {"error": "invalid_passkey_registration"}); return
+        if path in ("/api/auth/passkey/authenticate/options", "/api/auth/passkey/authenticate"):
+            if _passkey_unavailable(self): return
+            try:
+                length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}")
+                store = _auth_json(AUTH_STORE); user = store.get("user") or {}
+                username = str(payload.get("username") or user.get("username") or "").strip()
+                if not _username_matches(username, user): self._json(401, {"error": "invalid_credentials"}); return
+                passkeys = user.get("passkeys") or []
+                if path.endswith("/options"):
+                    if not passkeys: self._json(404, {"error": "no_passkeys"}); return
+                    options = generate_authentication_options(
+                        rp_id=WEBAUTHN_RP_ID, challenge=secrets.token_bytes(32),
+                        allow_credentials=[PublicKeyCredentialDescriptor(id=_unb64(x["credential_id"])) for x in passkeys],
+                        user_verification=UserVerificationRequirement.PREFERRED,
+                    )
+                    serialized = json.loads(options_to_json(options))
+                    _webauthn_challenges(store)["authentication"] = {"challenge": serialized["challenge"], "username": username, "expires_at": time.time() + 300}
+                    _save_auth_json(AUTH_STORE, store); self._json(200, serialized); return
+                challenge = _webauthn_challenges(store).pop("authentication", None)
+                credential = payload.get("credential") or {}
+                credential_id = str(credential.get("id") or "")
+                record = next((x for x in passkeys if hmac.compare_digest(str(x.get("credential_id")), credential_id)), None)
+                if not challenge or float(challenge.get("expires_at", 0)) <= time.time() or not hmac.compare_digest(str(challenge.get("username", "")), username) or not record:
+                    _save_auth_json(AUTH_STORE, store); self._json(401, {"error": "invalid_passkey"}); return
+                verified = verify_authentication_response(
+                    credential=credential, expected_challenge=_unb64(challenge["challenge"]),
+                    expected_rp_id=WEBAUTHN_RP_ID, expected_origin=WEBAUTHN_ORIGIN,
+                    credential_public_key=_unb64(record["public_key"]), credential_current_sign_count=int(record.get("sign_count", 0)),
+                )
+                record["sign_count"] = verified.new_sign_count; record["last_used_at"] = time.time(); _save_auth_json(AUTH_STORE, store)
+                session = _new_session(); self._json(200, {"authenticated": True}, cookies=[_session_header(session)]); return
+            except Exception:
+                self._json(401, {"error": "invalid_passkey"}); return
         if path == "/api/auth/setup":
             try:
                 length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}")
