@@ -44,6 +44,22 @@ def read_headers(path: Path) -> dict[str, list[str]]:
         return {"received": [], "from": [], "reply_to": []}
 
 
+def redacted_line_shapes(text: str) -> list[str]:
+    shapes = []
+    for line in str(text or "").splitlines():
+        clean = re.sub(r"\s+", " ", line).strip()
+        if not clean or len(clean) > 180:
+            continue
+        if re.search(r"[:：]", clean):
+            label = re.split(r"[:：]", clean, maxsplit=1)[0].strip().casefold()
+            label = re.sub(r"[^a-z0-9א-ת _/-]", "", label)[:80]
+            if label and label not in shapes:
+                shapes.append(label)
+        elif re.search(r"\b(?:20\\d{2}|[A-Z]{2,3}\\s?\\d{1,4}|(?:[01]?\\d|2[0-3]):[0-5]\\d)\b", clean, re.I):
+            shapes.append("unlabelled_structured_line")
+    return shapes[:40]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("intake_dir", type=Path)
@@ -56,6 +72,7 @@ def main() -> int:
     unresolved_reason_counts = Counter()
     unresolved_attachment_counts = Counter()
     persisted_review_reason_counts = Counter()
+    arkia_samples = []
     unresolved = []
     recent = []
 
@@ -96,6 +113,18 @@ def main() -> int:
             subject=str(record.get("subject") or ""),
             body=source_text,
         )
+        if provider["provider"] == "arkia" and len(arkia_samples) < 8:
+            probe = normalize_flight_fields({}, source_text)
+            arkia_samples.append({
+                "id_suffix": str(record.get("id") or "")[-8:],
+                "status": str(record.get("status") or ""),
+                "subject_shape": re.sub(r"\\d+", "#", str(record.get("subject") or ""))[:120],
+                "source_text_length": len(source_text),
+                "attachment_extensions": sorted({Path(str(item.get("filename") or "")).suffix.lower() for item in record.get("attachments") or []}),
+                "line_shapes": redacted_line_shapes(source_text),
+                "normalized_fields_present": sorted(key for key in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_date", "arrival_time") if str(probe.get(key) or "").strip()),
+                "stored_reason": str(record.get("review_reason") or "")[:100],
+            })
         provider_counts[provider["provider"]] += 1
         category = provider["category_hint"] if provider["category_hint"] != "marketplace" else None
         category = category or infer_extended_type({}, source_text) or "unknown"
@@ -161,6 +190,7 @@ def main() -> int:
         "unresolved_attachment_counts": dict(unresolved_attachment_counts),
         "persisted_review_reason_counts": dict(persisted_review_reason_counts),
         "recent": recent,
+        "arkia_samples": arkia_samples,
         "unresolved_count": len(unresolved),
         "unresolved": unresolved,
     }, ensure_ascii=False, indent=2, sort_keys=True))

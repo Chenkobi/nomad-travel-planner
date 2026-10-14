@@ -278,27 +278,53 @@ def save_push_subscription(subscription):
     _save_json_private(PUSH_SUBSCRIPTIONS, items[-20:])
 
 
-def send_push_notification(title, body, tag="tripy-booking"):
-    if _webpush is None or not VAPID_KEYS.exists():
-        return 0
+def _push_failure_code(exc):
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status in {404, 410} or "404" in str(exc) or "410" in str(exc):
+        return "subscription_expired"
+    if status in {401, 403}:
+        return "vapid_or_authorization"
+    if status:
+        return f"provider_http_{status}"
+    return type(exc).__name__.lower() or "push_delivery_failed"
+
+
+def send_push_notification(title, body, tag="tripy-booking", details=False):
+    result = {"sent": 0, "subscriptions": 0, "failures": [], "stale_removed": 0}
+    if _webpush is None:
+        result["failures"] = ["webpush_unavailable"]
+        return result if details else 0
+    if not VAPID_KEYS.exists():
+        result["failures"] = ["vapid_keys_missing"]
+        return result if details else 0
     try:
         keys = json.loads(VAPID_KEYS.read_text(encoding="utf-8"))
         private_key = keys.get("private_key")
-    except (OSError, ValueError, TypeError):
-        return 0
+        if not private_key:
+            raise ValueError("vapid_private_key_missing")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        result["failures"] = [_push_failure_code(exc)]
+        return result if details else 0
+    subscriptions = _load_json_list(PUSH_SUBSCRIPTIONS)
+    result["subscriptions"] = len(subscriptions)
     delivered = 0
     stale = []
+    failures = []
     payload = json.dumps({"title": str(title)[:80], "body": str(body)[:240], "tag": tag, "url": "/"}, ensure_ascii=False)
-    for subscription in _load_json_list(PUSH_SUBSCRIPTIONS):
+    for subscription in subscriptions:
         try:
             _webpush(subscription_info=subscription, data=payload, vapid_private_key=private_key, vapid_claims={"sub": VAPID_SUBJECT})
             delivered += 1
         except Exception as exc:
-            if "404" in str(exc) or "410" in str(exc):
+            code = _push_failure_code(exc)
+            failures.append(code)
+            if code == "subscription_expired":
                 stale.append(subscription.get("endpoint"))
     if stale:
         _save_json_private(PUSH_SUBSCRIPTIONS, [item for item in _load_json_list(PUSH_SUBSCRIPTIONS) if item.get("endpoint") not in stale])
-    return delivered
+    result.update({"sent": delivered, "failures": sorted(set(failures)), "stale_removed": len(stale)})
+    return result if details else delivered
 def save_email_index(items):
     EMAIL_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=EMAIL_DIR, prefix=".index.", suffix=".tmp", encoding="utf-8", delete=False) as handle:
@@ -2250,8 +2276,9 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 self._json(400, {"error": "invalid_review"}); return
         if self.path == "/api/push/test":
-            sent = send_push_notification("TRIPY · בדיקת התראות", "אם אתה רואה את ההודעה הזו, התראות הטלפון עובדות.", tag="tripy-push-test")
-            self._json(200, {"sent": sent, "subscriptions": len(_load_json_list(PUSH_SUBSCRIPTIONS)), "webpush_available": _webpush is not None})
+            result = send_push_notification("TRIPY · בדיקת התראות", "אם אתה רואה את ההודעה הזו, התראות הטלפון עובדות.", tag="tripy-push-test", details=True)
+            details = result if isinstance(result, dict) else {"sent": int(result), "subscriptions": 0, "failures": [], "stale_removed": 0}
+            self._json(200, {"sent": details.get("sent", 0), "subscriptions": details.get("subscriptions", 0), "failures": details.get("failures", []), "stale_removed": details.get("stale_removed", 0), "webpush_available": _webpush is not None})
             return
 
         if self.path == "/api/push/subscribe":
