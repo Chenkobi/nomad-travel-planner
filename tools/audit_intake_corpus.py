@@ -86,7 +86,7 @@ def main() -> int:
         for item in record.get("attachments") or []:
             suffix = Path(str(item.get("filename") or "")).suffix.lower()
             if item.get("content_type") == "text/html" or suffix in {".html", ".htm"}:
-                attachment_text.append(read_text(folder / str(item.get("path") or "")))
+                attachment_text.append(html_to_text(read_text(folder / str(item.get("path") or ""))))
             elif suffix == ".pdf":
                 try:
                     result = subprocess.run(
