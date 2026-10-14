@@ -490,6 +490,9 @@ def _push_failure_code(exc):
         return "vapid_or_authorization"
     if status:
         return f"provider_http_{status}"
+    detail = " ".join(str(exc).split())[:180].lower()
+    if isinstance(exc, ValueError) and detail:
+        return f"valueerror_{detail}"
     return type(exc).__name__.lower() or "push_delivery_failed"
 
 
@@ -2630,8 +2633,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 count = save_push_subscription(payload)
                 self._json(201, {"subscribed": True, "subscriptions": count}); return
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                self._json(400, {"error": "invalid_push_subscription"}); return
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                self._json(400, {"error": "invalid_push_subscription", "reason": str(exc)[:120]}); return
         if self.path == "/api/trips":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
