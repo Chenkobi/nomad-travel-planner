@@ -1301,7 +1301,7 @@ def process_incoming_email(record):
             final_record_status = "processed"
             telemetry_outcome = "success"
             persistence_outcome = "updated" if had_persisted_trip else "created"
-            update_email_record(intake_id, status="processed", intent=intent, processed_at=_utc_now().isoformat(), ingested_type=trip.get("_ingested_type", "hotel"), trip_id=trip.get("id"), document=filename, processing_error="")
+            update_email_record(intake_id, status="processed", intent=intent, processed_at=_utc_now().isoformat(), ingested_type=ai.get("type") or trip.get("_ingested_type") or "other", trip_id=trip.get("id"), document=filename, processing_error="")
             if TOKEN and ALLOWED_CHAT:
                 send(ALLOWED_CHAT, email_notification(intent, record, trip=trip))
             return record
@@ -1352,6 +1352,10 @@ def resume_pending_email_processing():
     for record in load_email_index():
         status = str(record.get("status") or "")
         reason = str(record.get("review_reason") or "")
+        if status == "processed":
+            expected_type = {"sixt": "car_rental", "wizz_air": "flight"}.get(str(record.get("provider") or "").casefold())
+            if expected_type and record.get("ingested_type") != expected_type:
+                update_email_record(intake_id=record.get("id"), ingested_type=expected_type)
         recent_lifecycle_retry = (
             status == "needs_review"
             and not record.get("lifecycle_recovery_attempted")
