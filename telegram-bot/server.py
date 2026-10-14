@@ -37,6 +37,8 @@ from booking_lifecycle import (
     enrich_booking_lifecycle,
     find_booking_matches,
     validate_date_range,
+    deduplicate_flights,
+    flight_identity,
 )
 from booking_types import infer_extended_type, normalize_insurance
 from event_contract import event_as_legacy_list, event_identity
@@ -332,8 +334,17 @@ def load_events():
 
 def save_events(events):
     DATA.parent.mkdir(parents=True, exist_ok=True)
+    seen_flights = set()
+    cleaned = []
+    for event in events or []:
+        if len(event) > 6 and str(event[4]) == "טיסה":
+            key = (str(event[2]).strip().casefold(), str(event[6]), str(event[3]).strip().casefold())
+            if key in seen_flights:
+                continue
+            seen_flights.add(key)
+        cleaned.append(event)
     with tempfile.NamedTemporaryFile("w", dir=DATA.parent, prefix=f".{DATA.name}.", suffix=".tmp", encoding="utf-8", delete=False) as handle:
-        handle.write(json.dumps(events, ensure_ascii=False, indent=2))
+        handle.write(json.dumps(cleaned, ensure_ascii=False, indent=2))
         tmp = Path(handle.name)
     tmp.replace(DATA)
 
@@ -344,6 +355,9 @@ def load_trips():
 
 def save_trips(trips):
     TRIPS.parent.mkdir(parents=True, exist_ok=True)
+    for trip in trips or []:
+        if isinstance(trip, dict) and isinstance(trip.get("flights"), list):
+            trip["flights"] = deduplicate_flights(trip["flights"])
     with tempfile.NamedTemporaryFile("w", dir=TRIPS.parent, prefix=f".{TRIPS.name}.", suffix=".tmp", encoding="utf-8", delete=False) as handle:
         handle.write(json.dumps(trips, ensure_ascii=False, indent=2))
         tmp = Path(handle.name)
@@ -357,6 +371,17 @@ def load_email_index():
         return value if isinstance(value, list) else []
     except (ValueError, OSError):
         return []
+
+
+def _email_raw_source(record):
+    email_id = str(record.get("id") or "").strip()
+    if not email_id:
+        return ""
+    for candidate in sorted(UPLOADS.glob(f"email_{email_id}_*.txt")):
+        resolved = resolve_document_path(UPLOADS, candidate.name)
+        if resolved is not None and resolved.exists() and resolved.is_file():
+            return f"/api/documents/{urllib.parse.quote(candidate.name)}"
+    return ""
 
 
 def load_notifications(limit=50):
@@ -374,6 +399,9 @@ def load_notifications(limit=50):
             "received_at": record.get("received_at") or "",
             "processed_at": record.get("processed_at") or "",
             "review_reason": str(record.get("review_reason") or "")[:180],
+            "provider": str(record.get("provider") or "")[:100],
+            "body_preview": re.sub(r"\s+", " ", email_body_text(record)).strip()[:280],
+            "raw_source": _email_raw_source(record),
             "trip_id": record.get("trip_id"),
         })
         if len(notifications) >= max(1, min(int(limit), 100)):
@@ -2403,7 +2431,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/notifications": self._json(200, {"notifications": load_notifications(), "unread": len(load_notifications())}); return
         if path == "/api/intake/email":
             fields = ("id", "status", "intent", "subject", "from", "to", "reply_to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "extraction_telemetry", "provider", "provider_category_hint", "provider_confidence", "provider_evidence", "ingested_type", "trip_id", "review_reason", "attachments")
-            emails = [{key: record.get(key) for key in fields} for record in load_email_index()]
+            emails = [{**{key: record.get(key) for key in fields}, "body_preview": re.sub(r"\\s+", " ", email_body_text(record)).strip()[:280], "raw_source": _email_raw_source(record)} for record in load_email_index()]
             self._json(200, {"emails": emails}); return
         if path == "/api/intake/telegram":
             self._json(200, {"intake": load_telegram_intake()}); return
@@ -2682,6 +2710,17 @@ class Handler(BaseHTTPRequestHandler):
                     record["revoked"] = True; record["revoked_at"] = time.time(); changed = True
             if changed: _save_share_records(records)
             self._json(200, {"revoked": changed, "trip_id": trip_id}); return
+        flight_match = re.fullmatch(r"/api/trips/([^/]+)/flights/(\d+)", path)
+        if flight_match:
+            trip_id = urllib.parse.unquote(flight_match.group(1)); index = int(flight_match.group(2)); trips = load_trips()
+            trip = next((item for item in trips if str(item.get("id")) == trip_id), None)
+            if not trip:
+                self._json(404, {"error": "trip_not_found"}); return
+            flights = trip.get("flights") if isinstance(trip.get("flights"), list) else []
+            if index < 0 or index >= len(flights):
+                self._json(404, {"error": "flight_not_found"}); return
+            deleted = flights.pop(index); trip["flights"] = flights; save_trips(trips)
+            self._json(200, {"deleted": deleted, "trip": trip}); return
         if self.path.startswith("/api/events/"):
             try:
                 index = int(urllib.parse.unquote(self.path[len("/api/events/"):]))

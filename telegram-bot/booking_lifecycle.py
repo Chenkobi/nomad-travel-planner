@@ -73,6 +73,34 @@ def _record_dates(record, kind):
     return record.get("pickup_date"), record.get("dropoff_date") or record.get("pickup_date")
 
 
+def flight_identity(record):
+    """Stable identity for one flight leg; time is deliberately not included."""
+    return (
+        _text(record.get("airline") or record.get("supplier")),
+        _text(record.get("flight_number") or record.get("number")),
+        str(record.get("departure_date") or record.get("date") or "").strip(),
+        _text(record.get("origin") or record.get("from")),
+        _text(record.get("destination") or record.get("to")),
+    )
+
+
+def deduplicate_flights(flights):
+    """Keep the first complete flight record for each stable leg identity."""
+    unique = []
+    seen = set()
+    for flight in flights or []:
+        identity = flight_identity(flight)
+        # Incomplete records are review material, not safe dedupe candidates.
+        if not all(identity):
+            unique.append(flight)
+            continue
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(flight)
+    return unique
+
+
 def booking_identity(kind, record):
     confirmation = _text(record.get("confirmation_number"))
     if confirmation:

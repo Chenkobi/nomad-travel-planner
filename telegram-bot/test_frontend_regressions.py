@@ -7,7 +7,27 @@ INDEX = (ROOT / "index.html").read_text(encoding="utf-8")
 
 
 class FrontendRegressionTests(unittest.TestCase):
-    def test_notification_bell_has_visible_panel_toggle_handler(self):
+    def test_share_is_icon_only_in_hero_not_metrics(self):
+        self.assertIn('class="hero-share"', INDEX)
+        self.assertIn('aria-label="שיתוף הטיול"', INDEX)
+        self.assertNotIn('hero-meta"><button class="primary" id="shareTripPrimary"', INDEX)
+
+    def test_flight_delete_swipe_is_authorized_and_persistent(self):
+        self.assertIn("flight-delete-affordance", INDEX)
+        self.assertIn("/flights/", INDEX)
+        self.assertIn("method:'DELETE'", INDEX)
+        server = (ROOT / "telegram-bot" / "server.py").read_text(encoding="utf-8")
+        self.assertIn("flight_not_found", server)
+        self.assertIn("flights.pop(index)", server)
+
+    def test_body_only_confirmation_has_structured_review_card(self):
+        self.assertIn('id="reviewFacts"', INDEX)
+        self.assertIn('id="reviewBodyPreview"', INDEX)
+        self.assertIn('id="reviewRawSource"', INDEX)
+        server = (ROOT / "telegram-bot" / "server.py").read_text(encoding="utf-8")
+        self.assertIn('"body_preview"', server)
+        self.assertIn('"raw_source"', server)
+
         self.assertIn("#notificationsButton", INDEX)
         self.assertIn("#notificationPanel", INDEX)
         self.assertIn("closeNotifications", INDEX)

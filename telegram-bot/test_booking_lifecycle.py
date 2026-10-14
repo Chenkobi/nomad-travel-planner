@@ -3,6 +3,8 @@ import unittest
 from booking_lifecycle import (
     BookingDateError,
     booking_identity,
+    deduplicate_flights,
+    flight_identity,
     cancel_booking,
     enrich_booking_lifecycle,
     find_booking_matches,
@@ -26,7 +28,13 @@ class BookingLifecycleTests(unittest.TestCase):
             "flights": [], "trains": [], "attractions": [], "rentals": [],
         }]
 
-    def test_confirmation_number_is_strong_match(self):
+    def test_flight_identity_deduplicates_repeated_confirmation_but_keeps_distinct_legs(self):
+        first = {"airline":"EL AL","number":"LY5113","departure_date":"2026-10-10","origin":"TLV","destination":"BUS","departure_time":"08:00"}
+        duplicate = dict(first, departure_time="08:05")
+        distinct = dict(first, destination="TBS")
+        self.assertEqual(flight_identity(first), flight_identity(duplicate))
+        self.assertEqual(len(deduplicate_flights([first, duplicate, distinct])), 2)
+
         matches = find_booking_matches(self.trips, {"confirmation_number": "ABC123"})
         self.assertEqual([(m["trip_id"], m["kind"]) for m in matches], [("trip-1", "hotel")])
 
