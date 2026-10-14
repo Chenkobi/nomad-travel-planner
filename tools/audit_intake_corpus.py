@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "telegram-bot"))
 from email_rules import classify_email_intent
 from booking_types import infer_extended_type
 from provider_rules import identify_email_provider
-from server import _explicit_date_tokens, _label_values, normalize_flight_fields, normalize_car_rental_fields
+from server import _explicit_date_tokens, _label_values, html_to_text, normalize_flight_fields, normalize_car_rental_fields
 
 
 def read_text(path: Path) -> str:
@@ -80,9 +80,10 @@ def main() -> int:
                         attachment_text.append(result.stdout)
                 except (OSError, subprocess.SubprocessError):
                     pass
+        clean_html = html_to_text(html)
         source_text = "\n".join((
             body,
-            html,
+            clean_html,
             attachment_names,
             *attachment_text,
             *headers["received"],
