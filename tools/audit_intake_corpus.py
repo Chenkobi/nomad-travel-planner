@@ -12,6 +12,7 @@ from collections import Counter
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -20,7 +21,7 @@ sys.path.insert(0, str(ROOT / "telegram-bot"))
 from email_rules import classify_email_intent
 from booking_types import infer_extended_type
 from provider_rules import identify_email_provider
-from server import normalize_flight_fields, normalize_car_rental_fields
+from server import _explicit_date_tokens, _label_values, normalize_flight_fields, normalize_car_rental_fields
 
 
 def read_text(path: Path) -> str:
@@ -119,6 +120,13 @@ def main() -> int:
                 "status": str(record.get("status") or ""),
                 "stage": str(record.get("processing_stage") or ""),
                 "missing_deterministic_fields": [key for key in required_fields if not str(parser_probe.get(key) or "").strip()],
+                "source_text_length": len(source_text),
+                "signal_counts": {
+                    "flight_codes": len(re.findall(r"(?<![A-Z0-9])[A-Z]{2,3}\\s?\\d{1,4}(?!\\d)", source_text, re.I)),
+                    "times": len(re.findall(r"\\b(?:[01]?\\d|2[0-3]):[0-5]\\d\\b", source_text)),
+                    "dates": len(_explicit_date_tokens(source_text)),
+                    "route_labels": sum(len(_label_values(source_text, labels)) for labels in (("from", "origin", "departure airport"), ("to", "destination", "arrival airport"), ("departure date", "date"))),
+                },
                 "review_reason": str(record.get("review_reason") or "")[:120],
                 "processing_error": str(record.get("processing_error") or "")[:120],
                 "telemetry_error": str(telemetry.get("validation_error_code") or ""),
