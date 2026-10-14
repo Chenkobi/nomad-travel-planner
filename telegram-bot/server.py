@@ -1354,8 +1354,11 @@ def resume_pending_email_processing():
         reason = str(record.get("review_reason") or "")
         if status == "processed":
             expected_type = {"sixt": "car_rental", "wizz_air": "flight"}.get(str(record.get("provider") or "").casefold())
+            changes = {"review_reason": ""} if record.get("review_reason") else {}
             if expected_type and record.get("ingested_type") != expected_type:
-                update_email_record(intake_id=record.get("id"), ingested_type=expected_type)
+                changes["ingested_type"] = expected_type
+            if changes:
+                update_email_record(intake_id=record.get("id"), **changes)
         recent_lifecycle_retry = (
             status == "needs_review"
             and not record.get("lifecycle_recovery_attempted")
