@@ -163,6 +163,21 @@ class EmailIntentTests(unittest.TestCase):
             ),
             'unknown',
         )
+    def test_explicit_change_overrides_contradictory_ai_confirmation(self):
+        self.assertEqual(
+            server.intent_from_ai(
+                {'type': 'flight', 'status': 'confirmed'},
+                'Your flight update',
+                'Your reservation has been changed and rescheduled.',
+            ),
+            'modified',
+        )
+
+    def test_unique_provider_fallback_matches_sixt_cancellation(self):
+        trips = [{"id": "trip-1", "rentals": [{"supplier": "sixt", "status": "confirmed", "vehicle_type": "compact"}]}]
+        matches = server.find_single_provider_booking(trips, {"type": "car_rental", "supplier": "sixt"})
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["kind"], "car_rental")
 
 
 if __name__ == '__main__':

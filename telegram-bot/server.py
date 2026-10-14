@@ -1022,6 +1022,14 @@ def email_notification(intent, record, trip=None, review=False):
 
 def intent_from_ai(ai, subject="", body=""):
     status = str((ai or {}).get("status") or "").strip().lower()
+    # An explicit refund remains distinct from a cancellation.
+    if status == "refunded" and re.search(r"\b(?:refund(?:ed)?|refund issued|refund processed)\b", " ".join((str(subject or ""), str(body or ""))).casefold()):
+        return "refunded"
+    # Explicit lifecycle language in the source outranks a contradictory model status.
+    # Generic policy/footer language is filtered by classify_email_intent.
+    explicit_intent = classify_email_intent(subject, body)
+    if explicit_intent in {"cancelled", "modified"}:
+        return explicit_intent
     status_map = {"confirmed": "confirmed", "modified": "modified", "cancelled": "cancelled", "refunded": "refunded"}
     if status in status_map:
         return status_map[status]
@@ -1103,6 +1111,25 @@ def create_dated_trip_shell(trips, start, end, source, filename, title="טיול
     return trip
 
 
+def find_single_provider_booking(trips, facts):
+    """Use provider + type only for an explicit cancellation when exactly one active booking matches."""
+    type_to_collection = {"flight": "flights", "car_rental": "rentals", "hotel": "hotels", "train": "trains", "attraction": "attractions", "restaurant": "restaurants"}
+    collection = type_to_collection.get(str(facts.get("type") or "").strip().lower())
+    provider = str(facts.get("supplier") or "").strip().casefold().replace("_", " ")
+    if not collection or not provider:
+        return []
+    matches = []
+    for trip in trips:
+        for record in trip.get(collection, []) or []:
+            if str(record.get("status", "confirmed")).casefold() in {"cancelled", "refunded", "superseded"}:
+                continue
+            candidates = [str(record.get("supplier") or ""), str(record.get("airline") or "")]
+            normalized = " ".join(candidates).casefold().replace("_", " ")
+            if provider in normalized or (provider == "wizz air" and "wizz" in normalized) or (provider == "sixt" and "sixt" in normalized):
+                matches.append({"trip_id": trip.get("id"), "trip": trip, "kind": next((kind for kind, items in {"flight":"flights","car_rental":"rentals","hotel":"hotels","train":"trains","attraction":"attractions","restaurant":"restaurants"}.items() if items == collection), collection), "record": record, "match": "provider_type_unique"})
+    return matches
+
+
 def apply_email_cancellation(ai, record, status="cancelled"):
     trips = load_trips()
     intake_id = record.get("id")
@@ -1112,6 +1139,9 @@ def apply_email_cancellation(ai, record, status="cancelled"):
                 if booking.get("cancelled_by_email") == intake_id:
                     return True, "already_cancelled"
     matches = find_booking_matches(trips, lifecycle_facts(ai))
+    if len(matches) != 1:
+        provider_matches = find_single_provider_booking(trips, ai)
+        matches = provider_matches if len(provider_matches) == 1 else []
     if len(matches) != 1:
         return False, "no_unique_match"
     match = matches[0]
@@ -1309,8 +1339,15 @@ def process_incoming_email(record):
             label = "TRIPY: הזמנה נקלטה" if final_record_status == "processed" else "TRIPY: נדרשת בדיקה"
             send_push_notification(label, str(record.get("subject") or "מייל נסיעות"), tag=f"tripy-{intake_id}")
 def resume_pending_email_processing():
+    retryable_errors = {
+        "ValueError: flight document missing unambiguous flight facts",
+        "ValueError: car rental missing pickup location, time, date, or vehicle type",
+    }
     for record in load_email_index():
-        if record.get("status") in {"received", "processing"}:
+        status = str(record.get("status") or "")
+        reason = str(record.get("review_reason") or "")
+        retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors)
+        if retryable:
             threading.Thread(target=process_incoming_email, args=(record,), daemon=True).start()
 
 def extract_pdf_text(path):
