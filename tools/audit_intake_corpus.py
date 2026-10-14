@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "telegram-bot"))
 from email_rules import classify_email_intent
 from booking_types import infer_extended_type
 from provider_rules import identify_email_provider
+from server import normalize_flight_fields, normalize_car_rental_fields
 
 
 def read_text(path: Path) -> str:
@@ -104,6 +105,11 @@ def main() -> int:
         intent_counts[intent] += 1
         if len(recent) < 8:
             telemetry = (record.get("extraction_telemetry") or [{}])[-1] or {}
+            parser_probe = normalize_flight_fields({}, source_text) if category == "flight" else normalize_car_rental_fields({}, source_text) if category == "car_rental" else {}
+            required_fields = {
+                "flight": ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_time"),
+                "car_rental": ("pickup_date", "pickup_time", "pickup_location", "vehicle_type"),
+            }.get(category, ())
             recent.append({
                 "id_suffix": str(record.get("id") or "")[-8:],
                 "received_at": str(record.get("received_at") or ""),
@@ -112,6 +118,7 @@ def main() -> int:
                 "intent": intent,
                 "status": str(record.get("status") or ""),
                 "stage": str(record.get("processing_stage") or ""),
+                "missing_deterministic_fields": [key for key in required_fields if not str(parser_probe.get(key) or "").strip()],
                 "review_reason": str(record.get("review_reason") or "")[:120],
                 "processing_error": str(record.get("processing_error") or "")[:120],
                 "telemetry_error": str(telemetry.get("validation_error_code") or ""),
