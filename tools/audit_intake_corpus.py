@@ -55,6 +55,7 @@ def main() -> int:
     unresolved_attachment_counts = Counter()
     persisted_review_reason_counts = Counter()
     unresolved = []
+    recent = []
 
     for record in records:
         folder = args.intake_dir / str(record["id"])
@@ -101,6 +102,20 @@ def main() -> int:
             "\n".join((body, html, *attachment_text, *headers["received"], *headers["from"])),
         )
         intent_counts[intent] += 1
+        if len(recent) < 8:
+            telemetry = (record.get("extraction_telemetry") or [{}])[-1] or {}
+            recent.append({
+                "id_suffix": str(record.get("id") or "")[-8:],
+                "received_at": str(record.get("received_at") or ""),
+                "provider": provider["provider"],
+                "category": category,
+                "intent": intent,
+                "status": str(record.get("status") or ""),
+                "stage": str(record.get("processing_stage") or ""),
+                "review_reason": str(record.get("review_reason") or "")[:120],
+                "processing_error": str(record.get("processing_error") or "")[:120],
+                "telemetry_error": str(telemetry.get("validation_error_code") or ""),
+            })
         reasons = []
         if provider["provider"] == "unknown":
             reasons.append("provider_unknown")
@@ -129,6 +144,7 @@ def main() -> int:
         "unresolved_reason_counts": dict(unresolved_reason_counts),
         "unresolved_attachment_counts": dict(unresolved_attachment_counts),
         "persisted_review_reason_counts": dict(persisted_review_reason_counts),
+        "recent": recent,
         "unresolved_count": len(unresolved),
         "unresolved": unresolved,
     }, ensure_ascii=False, indent=2, sort_keys=True))
