@@ -1348,6 +1348,8 @@ def resume_pending_email_processing():
         reason = str(record.get("review_reason") or "")
         retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors)
         if retryable:
+            if status == "needs_review":
+                update_email_record(intake_id=record.get("id"), status="received", previous_review_reason=reason, processing_error="")
             threading.Thread(target=process_incoming_email, args=(record,), daemon=True).start()
 
 def extract_pdf_text(path):
