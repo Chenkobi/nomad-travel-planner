@@ -42,6 +42,24 @@ class FlightTextFallbackTests(unittest.TestCase):
             self.assertEqual(result["origin"], "Tel Aviv")
             self.assertEqual(result["destination"], "Budapest")
 
+    def test_wizz_html_layout_with_nbsp_and_compact_schedule_is_complete(self):
+        text = """Wizz Air
+Flight Number: W4\u00a01234
+Departs from:
+Arrives to:
+Milan Malpensa - Terminal 1 (MXP)
+Tel-Aviv
+(TLV)
+13/12/2026\u00a013:0513/12/2026\u00a018:00"""
+        result = server.normalize_flight_fields({}, text)
+        for key in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_date", "arrival_time"):
+            self.assertTrue(result.get(key), key)
+        self.assertEqual(result["flight_number"], "W4 1234")
+        self.assertEqual(result["departure_date"], "2026-12-13")
+        self.assertEqual(result["arrival_date"], "2026-12-13")
+        self.assertEqual(result["departure_time"], "13:05")
+        self.assertEqual(result["arrival_time"], "18:00")
+
     def test_labeled_english_and_hebrew_facts_are_used_only_when_explicit(self):
         text = """חברת תעופה: Wizz Air
 מספר טיסה: W61234

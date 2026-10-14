@@ -703,6 +703,19 @@ def normalize_date_value(value):
             return datetime.strptime(text, "%Y-%m-%d").date().isoformat()
         except ValueError:
             return ""
+    numeric = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(20\d{2})", text)
+    if numeric:
+        first, second, year = map(int, numeric.groups())
+        if first > 12 and second <= 12:
+            fmt = "%d/%m/%Y"
+        elif second > 12 and first <= 12:
+            fmt = "%m/%d/%Y"
+        else:
+            return ""
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            return ""
     for fmt in ("%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d %b %Y", "%d%b%Y", "%d%B%Y"):
         try:
             return datetime.strptime(text, fmt).date().isoformat()
@@ -741,7 +754,7 @@ def _normalize_flight_number(value):
 
 
 def _explicit_date_tokens(source):
-    tokens = re.findall(r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)20\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{1,2},?\s+20\d{2}|\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+20\d{2})\b", source, re.I)
+    tokens = re.findall(r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/20\d{2}|\d{1,2}(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)20\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{1,2},?\s+20\d{2}|\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+20\d{2})\b", source, re.I)
     for hebrew, english in HEBREW_MONTHS.items():
         tokens.extend(re.findall(rf"\b\d{{1,2}}\s+{hebrew}\s+20\d{{2}}\b", source))
     return tokens
@@ -787,8 +800,8 @@ def normalize_flight_fields(ai, text=""):
         if len(codes) == 1:
             result["flight_number"] = codes[0]
 
-    origin_values = _label_values(source, ("from", "origin", "departure airport", "מוצא"))
-    destination_values = _label_values(source, ("to", "destination", "arrival airport", "יעד"))
+    origin_values = _label_values(source, ("from", "origin", "departure airport", "departs from", "מוצא"))
+    destination_values = _label_values(source, ("to", "destination", "arrival airport", "arrives to", "יעד"))
     set_if_missing("origin", origin_values)
     set_if_missing("destination", destination_values)
     if len(origin_values) > 1 or len(destination_values) > 1:
@@ -804,6 +817,38 @@ def normalize_flight_fields(ai, text=""):
     elif len(route_pairs) > 1:
         result["origin"] = ""
         result["destination"] = ""
+
+    # Wizz itinerary layout: two headers followed by two airport blocks, then one schedule line.
+    for index, line in enumerate(raw_lines[:-1]):
+        if line.casefold().rstrip(":") != "departs from" or raw_lines[index + 1].casefold().rstrip(":") != "arrives to":
+            continue
+        blocks = []
+        current = []
+        for candidate in raw_lines[index + 2:index + 12]:
+            if re.search(r"\b\d{1,2}/\d{1,2}/20\d{2}\b", candidate):
+                break
+            if candidate.casefold() in {"you are protected", "flight details"}:
+                continue
+            current.append(candidate)
+            if re.search(r"\([A-Z]{3}\)", candidate, re.I):
+                blocks.append(" ".join(current).strip())
+                current = []
+            if len(blocks) == 2:
+                break
+        if len(blocks) == 2:
+            result["origin"] = result.get("origin") or blocks[0]
+            result["destination"] = result.get("destination") or blocks[1]
+        break
+    schedule = re.search(
+        r"(\d{1,2}/\d{1,2}/20\d{2})\s+(\d{1,2}:\d{2})\s*/?\s*(\d{1,2}/\d{1,2}/20\d{2})\s+(\d{1,2}:\d{2})",
+        source,
+    )
+    if schedule:
+        departure_date, departure_time, arrival_date, arrival_time = schedule.groups()
+        result["departure_date"] = _normalize_explicit_date(departure_date)
+        result["arrival_date"] = _normalize_explicit_date(arrival_date)
+        result["departure_time"] = departure_time.zfill(5)
+        result["arrival_time"] = arrival_time.zfill(5)
 
     table_header = any(all(marker in line.casefold() for marker in ("from", "to", "flight", "departure", "arrival")) for line in raw_lines)
     if table_header:
@@ -877,6 +922,25 @@ def normalize_flight_fields(ai, text=""):
         result["departure_time"] = times[0].zfill(5)
     if not result.get("arrival_time") and len(times) == 2:
         result["arrival_time"] = times[1].zfill(5)
+    compact_schedule = re.search(
+        r"(\d{1,2}/\d{1,2}/20\d{2})\s+(\d{1,2}:\d{2})(\d{1,2}/\d{1,2}/20\d{2})\s+(\d{1,2}:\d{2})",
+        source,
+    )
+    if compact_schedule:
+        departure_date, departure_time, arrival_date, arrival_time = compact_schedule.groups()
+        result["departure_date"] = _normalize_explicit_date(departure_date)
+        result["arrival_date"] = _normalize_explicit_date(arrival_date)
+        result["departure_time"] = departure_time.zfill(5)
+        result["arrival_time"] = arrival_time.zfill(5)
+    for line in raw_lines:
+        numeric_dates = re.findall(r"\d{1,2}/\d{1,2}/20\d{2}", line)
+        line_times = re.findall(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b", line)
+        if len(numeric_dates) >= 2 and len(line_times) >= 2:
+            result["departure_date"] = _normalize_explicit_date(numeric_dates[0])
+            result["arrival_date"] = _normalize_explicit_date(numeric_dates[1])
+            result["departure_time"] = line_times[0].zfill(5)
+            result["arrival_time"] = line_times[1].zfill(5)
+            break
     return result
 
 
