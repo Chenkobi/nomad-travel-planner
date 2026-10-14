@@ -350,8 +350,22 @@ def save_events(events):
 
 def load_trips():
     if not TRIPS.exists(): return []
-    try: return json.loads(TRIPS.read_text(encoding="utf-8"))
-    except (ValueError, OSError): return []
+    try:
+        trips = json.loads(TRIPS.read_text(encoding="utf-8"))
+        if not isinstance(trips, list):
+            return []
+        changed = False
+        for trip in trips:
+            if isinstance(trip, dict) and isinstance(trip.get("flights"), list):
+                flights = deduplicate_flights(trip["flights"])
+                if len(flights) != len(trip["flights"]):
+                    trip["flights"] = flights
+                    changed = True
+        if changed:
+            save_trips(trips)
+        return trips
+    except (ValueError, OSError):
+        return []
 
 def save_trips(trips):
     TRIPS.parent.mkdir(parents=True, exist_ok=True)
