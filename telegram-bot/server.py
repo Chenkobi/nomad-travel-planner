@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Small dependency-free TRIPY Telegram bridge for the working travel version."""
-import base64, hashlib, hmac, io, json, os, re, shutil, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, hashlib, hmac, io, json, os, re, secrets, shutil, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone
 from email import policy
 from email.header import decode_header, make_header
@@ -47,6 +47,14 @@ API_AUTH_TOKEN = os.getenv("TRIPY_API_AUTH_TOKEN", "").strip()
 API_ALLOWED_ORIGIN = os.getenv("TRIPY_API_ALLOWED_ORIGIN", "https://trip.atlasim.co.il").strip()
 EMAIL_DIR = Path(os.getenv("TRIPY_EMAIL_DIR", ROOT / "trip-email"))
 EMAIL_INDEX = EMAIL_DIR / "index.json"
+AUTH_STORE = EMAIL_DIR / "auth.json"
+SHARE_STORE = EMAIL_DIR / "share-tokens.json"
+TRIPY_SETUP_TOKEN = os.getenv("TRIPY_SETUP_TOKEN", "").strip()
+SESSION_COOKIE = "tripy_session"
+SHARE_COOKIE = "tripy_share"
+PASSWORD_ITERATIONS = 310_000
+SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+SHARE_TTL_SECONDS = 7 * 24 * 60 * 60
 TELEGRAM_INTAKE = Path(os.getenv("TRIPY_TELEGRAM_INTAKE_FILE", ROOT / "telegram-intake.json"))
 PUSH_SUBSCRIPTIONS = Path(os.getenv("TRIPY_PUSH_SUBSCRIPTIONS_FILE", EMAIL_DIR / "push-subscriptions.json"))
 VAPID_KEYS = Path(os.getenv("TRIPY_VAPID_KEYS_FILE", EMAIL_DIR / "vapid-keys.json"))
@@ -146,26 +154,129 @@ def waze_destination(name, address):
 
 
 def api_requires_auth(path):
-    """Protect API data and mutations while leaving signed intake public."""
-    return path.startswith("/api/") and path not in ("/api/rates", "/api/intake/email")
+    """Protect private API data while leaving health, auth, rates and intake public."""
+    return path.startswith("/api/") and path not in (
+        "/api/rates", "/api/intake/email", "/api/auth/setup", "/api/auth/login",
+        "/api/auth/me", "/api/auth/logout", "/api/share/me",
+    ) and not path.startswith("/api/share/")
 
 
-def api_request_authorized(headers):
-    """Allow all API requests only when local fallback is explicitly active."""
-    if not API_AUTH_TOKEN:
-        return True
-    authorization = str(headers.get("Authorization", ""))
-    supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
-    supplied = supplied or str(headers.get("X-TRIPY-API-TOKEN", ""))
-    if supplied and hmac.compare_digest(supplied, API_AUTH_TOKEN):
-        return True
+def _auth_json(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _save_auth_json(path, value):
+    _save_json_private(path, value)
+
+
+def _password_hash(password, salt=None):
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"), salt, PASSWORD_ITERATIONS)
+    return {"salt": base64.urlsafe_b64encode(salt).decode("ascii"), "hash": base64.urlsafe_b64encode(digest).decode("ascii"), "iterations": PASSWORD_ITERATIONS}
+
+
+def _password_matches(password, record):
+    try:
+        salt = base64.urlsafe_b64decode(str(record["salt"]).encode("ascii"))
+        expected = base64.urlsafe_b64decode(str(record["hash"]).encode("ascii"))
+        actual = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"), salt, int(record.get("iterations", PASSWORD_ITERATIONS)))
+        return hmac.compare_digest(actual, expected)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _username_matches(username, record):
+    expected = str(record.get("username", "")).strip().casefold()
+    supplied = str(username or "").strip().casefold()
+    return bool(expected and supplied and hmac.compare_digest(supplied, expected))
+
+
+def _cookie_value(headers, name):
     cookie = SimpleCookie()
     try:
         cookie.load(str(headers.get("Cookie", "")))
     except (ValueError, TypeError):
-        return False
-    session = cookie.get("tripy_session")
-    return bool(session and hmac.compare_digest(session.value, API_AUTH_TOKEN))
+        return ""
+    item = cookie.get(name)
+    return item.value if item else ""
+
+
+def _auth_enabled():
+    return bool(TRIPY_SETUP_TOKEN or _auth_json(AUTH_STORE).get("user"))
+
+
+def _session_user(headers):
+    value = _cookie_value(headers, SESSION_COOKIE)
+    if not value:
+        return None
+    store = _auth_json(AUTH_STORE)
+    record = (store.get("sessions") or {}).get(hashlib.sha256(value.encode()).hexdigest())
+    if not record or float(record.get("expires_at", 0)) <= time.time():
+        return None
+    return {"id": "owner"}
+
+
+def api_request_authorized(headers):
+    """Accept the legacy API token or a persistent authenticated session."""
+    if API_AUTH_TOKEN:
+        authorization = str(headers.get("Authorization", ""))
+        supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+        supplied = supplied or str(headers.get("X-TRIPY-API-TOKEN", ""))
+        if supplied and hmac.compare_digest(supplied, API_AUTH_TOKEN):
+            return True
+        if _cookie_value(headers, SESSION_COOKIE) == API_AUTH_TOKEN:
+            return True
+    if _session_user(headers):
+        return True
+    # Preserve the old local no-token behavior until a setup token/account exists.
+    return not API_AUTH_TOKEN and not _auth_enabled()
+
+
+def _new_session():
+    value = secrets.token_urlsafe(32)
+    store = _auth_json(AUTH_STORE)
+    sessions = store.setdefault("sessions", {})
+    sessions[hashlib.sha256(value.encode()).hexdigest()] = {"created_at": time.time(), "expires_at": time.time() + SESSION_TTL_SECONDS}
+    _save_auth_json(AUTH_STORE, store)
+    return value
+
+
+def _session_header(value, *, share=False, clear=False):
+    name = SHARE_COOKIE if share else SESSION_COOKIE
+    path = "/api/share" if share else "/"
+    max_age = 0 if clear else (SHARE_TTL_SECONDS if share else SESSION_TTL_SECONDS)
+    cookie_value = "" if clear else value
+    return f"{name}={cookie_value}; Path={path}; Max-Age={max_age}; HttpOnly; SameSite=Lax; Secure"
+
+
+def _share_records():
+    value = _auth_json(SHARE_STORE)
+    records = value.get("tokens")
+    return records if isinstance(records, list) else []
+
+
+def _save_share_records(records):
+    _save_auth_json(SHARE_STORE, {"tokens": records})
+
+
+def _scoped_trip(trip_id):
+    return next((trip for trip in load_trips() if str(trip.get("id")) == str(trip_id)), None)
+
+
+def _share_trip(headers):
+    value = _cookie_value(headers, SHARE_COOKIE)
+    if not value:
+        return None
+    digest = hashlib.sha256(value.encode()).hexdigest()
+    now = time.time()
+    for record in _share_records():
+        if record.get("session_hash") == digest and not record.get("revoked") and float(record.get("session_expires_at", 0)) > now:
+            return _scoped_trip(record.get("trip_id"))
+    return None
 
 
 def cors_origin(origin):
@@ -2188,13 +2299,14 @@ def poll():
             time.sleep(5)
 
 class Handler(BaseHTTPRequestHandler):
-    def _json(self, status, payload):
+    def _json(self, status, payload, cookies=None):
         raw = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status); self.send_header("Content-Type", "application/json; charset=utf-8")
         origin = cors_origin(self.headers.get("Origin", ""))
         if origin: self.send_header("Access-Control-Allow-Origin", origin)
         if API_AUTH_TOKEN and origin: self.send_header("Access-Control-Allow-Credentials", "true")
         if origin and origin != "*": self.send_header("Vary", "Origin")
+        for cookie in cookies or []: self.send_header("Set-Cookie", cookie)
         self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
     def _authorized(self, path):
         if api_requires_auth(path) and not api_request_authorized(self.headers):
@@ -2218,6 +2330,26 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/ready", "/readyz"):
             ready = HTTP_READY and EMAIL_READY
             self._json(200 if ready else 503, {"status": "ready" if ready else "starting", "http": HTTP_READY, "email": EMAIL_READY, "telegram": telegram_status()}); return
+        if path == "/api/auth/me":
+            self._json(200, {"authenticated": bool(_session_user(self.headers) or (API_AUTH_TOKEN and api_request_authorized(self.headers)) or not _auth_enabled()), "setup_required": bool(TRIPY_SETUP_TOKEN and not _auth_json(AUTH_STORE).get("user"))}); return
+        if path == "/api/share/me":
+            trip = _share_trip(self.headers)
+            self._json(200 if trip else 401, {"trip": trip} if trip else {"error": "share_unauthorized"}); return
+        if path.startswith("/api/share/"):
+            token = path[len("/api/share/"):]
+            if not re.fullmatch(r"[A-Za-z0-9_-]{20,200}", token):
+                self._json(404, {"error": "share_not_found"}); return
+            digest = hashlib.sha256(token.encode()).hexdigest()
+            records = _share_records(); record = next((item for item in records if item.get("token_hash") == digest), None)
+            if not record or record.get("used") or record.get("revoked") or float(record.get("expires_at", 0)) <= time.time():
+                self._json(404, {"error": "share_not_found"}); return
+            trip = _scoped_trip(record.get("trip_id"))
+            if not trip:
+                self._json(404, {"error": "trip_not_found"}); return
+            session = secrets.token_urlsafe(32)
+            record.update({"used": True, "used_at": time.time(), "session_hash": hashlib.sha256(session.encode()).hexdigest(), "session_expires_at": time.time() + SHARE_TTL_SECONDS})
+            _save_share_records(records)
+            self._json(200, {"trip": trip}, cookies=[_session_header(session, share=True)]); return
         if path == "/api/rates":
             try:
                 request = urllib.request.Request("https://api.frankfurter.dev/v2/rates?base=ILS&quotes=USD,GBP,EUR,CHF,CAD,AUD,JPY,HUF,INR,PLN,CZK,TRY,RON,BGN,AED,GEL", headers={"Accept":"application/json", "User-Agent":"TRIPY/1.0"})
@@ -2251,8 +2383,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "document_not_found"}); return
         if path in ("/", "/index.html"):
             raw = (ROOT / "index.html").read_bytes(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store")
-            if API_AUTH_TOKEN:
-                self.send_header("Set-Cookie", "tripy_session=" + API_AUTH_TOKEN + "; Path=/; HttpOnly; SameSite=Lax; Secure")
+            if API_AUTH_TOKEN and not _auth_enabled():
+                self.send_header("Set-Cookie", _session_header(_new_session()))
             self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         static = {"/tripy-icon.png": (ROOT / "tripy-icon.png", "image/png"), "/manifest.webmanifest": (ROOT / "manifest.webmanifest", "application/manifest+json"), "/service-worker.js": (ROOT / "service-worker.js", "application/javascript; charset=utf-8")}
         if path in static:
@@ -2263,7 +2395,42 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         if not self._authorized(path): return
-        if self.path == "/api/intake/review":
+        if path == "/api/auth/setup":
+            try:
+                length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}")
+                store = _auth_json(AUTH_STORE)
+                username = str(payload.get("username") or "").strip()
+                password = str(payload.get("password") or "")
+                if not TRIPY_SETUP_TOKEN or not hmac.compare_digest(str(payload.get("setup_token") or ""), TRIPY_SETUP_TOKEN): self._json(401, {"error": "invalid_setup_token"}); return
+                if store.get("user"): self._json(409, {"error": "already_setup"}); return
+                if len(username) < 3 or len(username) > 64: self._json(400, {"error": "invalid_username"}); return
+                if len(password) < 12: self._json(400, {"error": "password_too_short"}); return
+                store["user"] = {"username": username, "password": _password_hash(password)}; store["created_at"] = time.time(); store.setdefault("sessions", {})
+                _save_auth_json(AUTH_STORE, store); session = _new_session()
+                self._json(201, {"authenticated": True}, cookies=[_session_header(session)]); return
+            except (OSError, ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error": "invalid_setup"}); return
+        if path == "/api/auth/login":
+            try:
+                length = int(self.headers.get("Content-Length", "0")); payload = json.loads(self.rfile.read(length) or b"{}")
+                store = _auth_json(AUTH_STORE)
+                user = store.get("user") or {}
+                if not _username_matches(payload.get("username"), user) or not _password_matches(payload.get("password", ""), user.get("password", {})): self._json(401, {"error": "invalid_credentials"}); return
+                session = _new_session(); self._json(200, {"authenticated": True}, cookies=[_session_header(session)]); return
+            except (OSError, ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error": "invalid_login"}); return
+        if path == "/api/auth/logout":
+            value = _cookie_value(self.headers, SESSION_COOKIE); store = _auth_json(AUTH_STORE)
+            if value: (store.setdefault("sessions", {})).pop(hashlib.sha256(value.encode()).hexdigest(), None); _save_auth_json(AUTH_STORE, store)
+            self._json(200, {"authenticated": False}, cookies=[_session_header("", clear=True)]); return
+        share_match = re.fullmatch(r"/api/trips/([^/]+)/share", path)
+        if share_match:
+            if not _session_user(self.headers) and not api_request_authorized(self.headers): self._json(401, {"error": "unauthorized"}); return
+            trip_id = urllib.parse.unquote(share_match.group(1)); trip = _scoped_trip(trip_id)
+            if not trip: self._json(404, {"error": "trip_not_found"}); return
+            token = secrets.token_urlsafe(32); now = time.time(); records = _share_records()
+            records[:] = [r for r in records if not (r.get("trip_id") == trip_id and (r.get("used") or r.get("revoked") or float(r.get("expires_at", 0)) <= now))]
+            records.append({"token_hash": hashlib.sha256(token.encode()).hexdigest(), "trip_id": trip_id, "created_at": now, "expires_at": now + SHARE_TTL_SECONDS, "used": False, "revoked": False})
+            _save_share_records(records); self._json(201, {"token": token, "trip_id": trip_id, "expires_in": SHARE_TTL_SECONDS}); return
+        if path == "/api/intake/review":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length) or b"{}")
@@ -2401,6 +2568,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         path = self.path.split("?", 1)[0]
         if not self._authorized(path): return
+        share_match = re.fullmatch(r"/api/trips/([^/]+)/share", path)
+        if share_match:
+            trip_id = urllib.parse.unquote(share_match.group(1)); records = _share_records(); changed = False
+            for record in records:
+                if record.get("trip_id") == trip_id and not record.get("revoked"):
+                    record["revoked"] = True; record["revoked_at"] = time.time(); changed = True
+            if changed: _save_share_records(records)
+            self._json(200, {"revoked": changed, "trip_id": trip_id}); return
         if self.path.startswith("/api/events/"):
             try:
                 index = int(urllib.parse.unquote(self.path[len("/api/events/"):]))
