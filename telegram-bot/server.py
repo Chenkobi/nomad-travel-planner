@@ -30,7 +30,7 @@ from booking_lifecycle import (
 )
 from booking_types import infer_extended_type, normalize_insurance
 from event_contract import event_as_legacy_list, event_identity
-from email_rules import classify_email_intent, looks_like_travel_email
+from email_rules import _strong_confirmation_subject, classify_email_intent, looks_like_travel_email
 from provider_rules import enrich_ai_with_provider, identify_email_provider
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1028,6 +1028,11 @@ def intent_from_ai(ai, subject="", body=""):
     # Explicit lifecycle language in the source outranks a contradictory model status.
     # Generic policy/footer language is filtered by classify_email_intent.
     explicit_intent = classify_email_intent(subject, body)
+    if explicit_intent == "confirmed" and (
+        _strong_confirmation_subject(subject)
+        or re.search(r"\b(?:reservation|booking)\s+(?:is\s+)?confirmed\b|\bconfirmed\s+(?:reservation|booking)\b", str(body or "").casefold())
+    ):
+        return "confirmed"
     if explicit_intent in {"cancelled", "modified"}:
         return explicit_intent
     status_map = {"confirmed": "confirmed", "modified": "modified", "cancelled": "cancelled", "refunded": "refunded"}
@@ -1346,8 +1351,16 @@ def resume_pending_email_processing():
     for record in load_email_index():
         status = str(record.get("status") or "")
         reason = str(record.get("review_reason") or "")
-        retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors)
+        recent_lifecycle_retry = (
+            status == "needs_review"
+            and not record.get("lifecycle_recovery_attempted")
+            and str(record.get("provider") or "").casefold() in {"wizz_air", "sixt"}
+            and str(record.get("intent") or "").casefold() in {"modified", "cancelled"}
+        )
+        retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors) or recent_lifecycle_retry
         if retryable:
+            if recent_lifecycle_retry:
+                update_email_record(intake_id=record.get("id"), lifecycle_recovery_attempted=True)
             if status == "needs_review":
                 update_email_record(intake_id=record.get("id"), status="received", previous_review_reason=reason, processing_error="")
             threading.Thread(target=process_incoming_email, args=(record,), daemon=True).start()

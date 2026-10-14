@@ -173,6 +173,29 @@ class EmailIntentTests(unittest.TestCase):
             'modified',
         )
 
+    def test_provider_confirmation_subject_overrides_cancellation_policy_footer(self):
+        for subject in (
+            "Your booking at Milan Airport Malpensa T1 is confirmed: #9740201569",
+            "Your travel itinerary: MW77WZ",
+        ):
+            self.assertEqual(
+                server.intent_from_ai(
+                    {'type': 'car_rental', 'status': 'cancelled'},
+                    subject,
+                    'Cancellation policy: free cancellation until pickup. You may cancel online.',
+                ),
+                'confirmed',
+            )
+
+    def test_real_cancellation_requires_an_event_sentence(self):
+        self.assertEqual(
+            server.intent_from_ai(
+                {'type': 'hotel', 'status': 'confirmed'},
+                'Reservation update',
+                'Your reservation has been cancelled by the provider.',
+            ),
+            'cancelled',
+        )
     def test_unique_provider_fallback_matches_sixt_cancellation(self):
         trips = [{"id": "trip-1", "rentals": [{"supplier": "sixt", "status": "confirmed", "vehicle_type": "compact"}]}]
         matches = server.find_single_provider_booking(trips, {"type": "car_rental", "supplier": "sixt"})

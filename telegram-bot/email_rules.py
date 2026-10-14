@@ -21,15 +21,56 @@ def looks_like_travel_email(subject, body):
     return any(marker in text for marker in TRAVEL_MARKERS)
 
 
+def _strong_confirmation_subject(subject):
+    subject = str(subject or "").casefold()
+    return bool(re.search(
+        r"\b(?:confirmed|booking\s+confirmed|reservation\s+confirmed|travel itinerary|e-ticket|voucher|ticket)\b",
+        subject,
+    ))
+
+
+def _strong_cancellation_event(text):
+    # Deliberately require an event sentence. Policy/footer language must not match.
+    text = re.sub(r"\b(?:cancellation|cancellable|cancelation)\s+policy\b", "", text)
+    text = re.sub(r"\bfree\s+cancellation\b|\bcancel\s+anytime\b|\bmay\s+cancel\b", "", text)
+    return bool(re.search(
+        r"\b(?:your|the)\s+(?:reservation|booking|confirmation|itinerary|flight|hotel|trip|rental)\s+"
+        r"(?:(?:has been|was|is now|is)\s+)?(?:cancelled|canceled|voided)\b"
+        r"|\b(?:reservation|booking|confirmation|itinerary|flight|hotel|trip|rental)\b.{0,30}\b(?:cancelled|canceled|voided)\b"
+        r"|\b(?:we|the airline|the hotel|the provider)\s+(?:have|has)\s+cancelled\b"
+        r"|\bcancellation\s+confirmed\b"
+        r"|\b(?:refund issued|refund processed|refunded in full)\b",
+        text,
+    ))
+
+
+def _strong_modification_event(text):
+    text = re.sub(r"\blast updated\b|\bupdate your (?:email )?preferences\b", "", text)
+    return bool(re.search(
+        r"\b(?:your|the)\s+(?:reservation|booking|itinerary|flight|hotel|trip|dates|date|time|room|route)\s+"
+        r"(?:(?:has(?:\s+been)?|was|is now|is)\s+)?(?:changed|modified|updated|rebooked|rescheduled)\b"
+        r"|\b(?:your|the)\s+(?:flight|booking|reservation)\s+has\s+been\s+(?:changed|rescheduled)\b",
+        text,
+    ))
+
+
 def classify_email_intent(subject, body):
+    subject_text = re.sub(r"\s+", " ", str(subject or "")).strip().casefold()
     text = _normalized(subject, body)
-    cancellation_language = re.search(r"\b(?:reservation|booking|confirmation|itinerary|flight|hotel|trip)\b.{0,60}\b(?:cancelled|canceled|cancel|voided)\b|\b(?:cancelled|canceled|voided)\b.{0,60}\b(?:reservation|booking|confirmation|itinerary|flight|hotel|trip)\b|\b(?:refund issued|refund processed|refunded in full|cancellation confirmed)\b", text)
-    if cancellation_language:
+
+    # Explicit lifecycle events in the subject outrank generic booking words.
+    if _strong_cancellation_event(subject_text):
         return "cancelled"
-    modification_text = re.sub(r"\blast updated\b|\bupdate your (?:email )?preferences\b", "", text)
-    modification_language = re.search(r"\b(?:reservation|booking|itinerary|flight|hotel|trip|dates|date|time|room|route)\b.{0,60}\b(?:changed|change|modified|modification|updated|update|rebooked|rescheduled)\b|\b(?:changed|modified|rebooked|rescheduled)\b.{0,60}\b(?:reservation|booking|itinerary|flight|hotel|trip|dates|date|time|room|route)\b", modification_text)
-    if modification_language:
+    if _strong_modification_event(subject_text):
         return "modified"
-    if any(marker in text for marker in CONFIRM_MARKERS):
+    # Confirmation subjects are the strongest signal for provider booking emails.
+    # This prevents policy/footer terms in the body from changing a new booking.
+    if _strong_confirmation_subject(subject_text):
+        return "confirmed"
+    if _strong_cancellation_event(text):
+        return "cancelled"
+    if _strong_modification_event(text):
+        return "modified"
+    if any(marker in subject_text for marker in ("confirmation", "reservation", "booking", "itinerary", "voucher", "ticket")):
         return "confirmed"
     return "unknown"
