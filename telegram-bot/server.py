@@ -74,6 +74,7 @@ SHARE_TTL_SECONDS = 7 * 24 * 60 * 60
 TELEGRAM_INTAKE = Path(os.getenv("TRIPY_TELEGRAM_INTAKE_FILE", ROOT / "telegram-intake.json"))
 PUSH_SUBSCRIPTIONS = Path(os.getenv("TRIPY_PUSH_SUBSCRIPTIONS_FILE", EMAIL_DIR / "push-subscriptions.json"))
 VAPID_KEYS = Path(os.getenv("TRIPY_VAPID_KEYS_FILE", EMAIL_DIR / "vapid-keys.json"))
+VAPID_PRIVATE_KEY_FILE = Path(os.getenv("TRIPY_VAPID_PRIVATE_KEY_FILE", EMAIL_DIR / "vapid-private.pem"))
 VAPID_SUBJECT = os.getenv("TRIPY_VAPID_SUBJECT", "mailto:trippy@atlasim.co.il").strip()
 EMAIL_PROCESSING_LEASE_SECONDS = int(os.getenv("TRIPY_EMAIL_PROCESSING_LEASE_SECONDS", "900"))
 TELEGRAM_STARTUP_RETRIES = max(1, int(os.getenv("TRIPY_TELEGRAM_STARTUP_RETRIES", "3")))
@@ -452,6 +453,11 @@ def vapid_public_key():
         _save_json_private(VAPID_KEYS, {"private_key": private_pem, "public_key": base64.urlsafe_b64encode(public).decode("ascii").rstrip("=")})
     try:
         value = json.loads(VAPID_KEYS.read_text(encoding="utf-8"))
+        private_pem = str(value.get("private_key") or "")
+        if private_pem and not VAPID_PRIVATE_KEY_FILE.exists():
+            VAPID_PRIVATE_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            VAPID_PRIVATE_KEY_FILE.write_text(private_pem, encoding="ascii")
+            VAPID_PRIVATE_KEY_FILE.chmod(0o600)
         return str(value.get("public_key") or "")
     except (OSError, ValueError, TypeError):
         return ""
@@ -504,11 +510,16 @@ def send_push_notification(title, body, tag="tripy-booking", details=False):
     if not VAPID_KEYS.exists():
         result["failures"] = ["vapid_keys_missing"]
         return result if details else 0
+    # Materialize the PEM file from the persistent key store if needed.
+    vapid_public_key()
+    if not VAPID_PRIVATE_KEY_FILE.exists():
+        result["failures"] = ["vapid_private_key_missing"]
+        return result if details else 0
     try:
         keys = json.loads(VAPID_KEYS.read_text(encoding="utf-8"))
-        private_key = keys.get("private_key")
-        if not private_key:
+        if not keys.get("private_key"):
             raise ValueError("vapid_private_key_missing")
+        private_key = str(VAPID_PRIVATE_KEY_FILE)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         result["failures"] = [_push_failure_code(exc)]
         return result if details else 0
