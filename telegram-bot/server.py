@@ -1247,7 +1247,8 @@ def process_incoming_email(record):
             return record
         provider_hint = str(provider_info.get("category_hint") or "").strip()
         ai_type = str(ai.get("type") or "").strip().lower()
-        if provider_info.get("confidence", 0) >= 0.8 and provider_hint in _TELEMETRY_TYPES and ai_type in {"", "other"}:
+        if provider_info.get("confidence", 0) >= 0.8 and provider_hint in _TELEMETRY_TYPES and provider_hint != "marketplace":
+            # Direct provider classification outranks generic model type inference.
             ai["type"] = provider_hint
         intent = intent_from_ai(ai, subject, body)
         telemetry_type = _telemetry_choice(ai.get("type"), _TELEMETRY_TYPES, "other")
