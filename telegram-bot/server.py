@@ -276,6 +276,7 @@ def save_push_subscription(subscription):
     items = [item for item in items if str(item.get("endpoint") or "") != endpoint]
     items.append({"endpoint": endpoint, "keys": {"p256dh": str(keys["p256dh"]), "auth": str(keys["auth"])}})
     _save_json_private(PUSH_SUBSCRIPTIONS, items[-20:])
+    return len(items[-20:])
 
 
 def _push_failure_code(exc):
@@ -2285,8 +2286,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length) or b"{}")
-                save_push_subscription(payload)
-                self._json(201, {"subscribed": True}); return
+                count = save_push_subscription(payload)
+                self._json(201, {"subscribed": True, "subscriptions": count}); return
             except (OSError, ValueError, TypeError, json.JSONDecodeError):
                 self._json(400, {"error": "invalid_push_subscription"}); return
         if self.path == "/api/trips":
