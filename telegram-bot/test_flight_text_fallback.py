@@ -50,13 +50,13 @@ Arrives to:
 Milan Malpensa - Terminal 1 (MXP)
 Tel-Aviv
 (TLV)
-13/12/2026\u00a013:0513/12/2026\u00a018:00"""
+12/12/2026\u00a013:0512/12/2026\u00a018:00"""
         result = server.normalize_flight_fields({}, text)
         for key in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_date", "arrival_time"):
             self.assertTrue(result.get(key), key)
         self.assertEqual(result["flight_number"], "W4 1234")
-        self.assertEqual(result["departure_date"], "2026-12-13")
-        self.assertEqual(result["arrival_date"], "2026-12-13")
+        self.assertEqual(result["departure_date"], "2026-12-12")
+        self.assertEqual(result["arrival_date"], "2026-12-12")
         self.assertEqual(result["departure_time"], "13:05")
         self.assertEqual(result["arrival_time"], "18:00")
 

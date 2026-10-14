@@ -839,14 +839,22 @@ def normalize_flight_fields(ai, text=""):
             result["origin"] = result.get("origin") or blocks[0]
             result["destination"] = result.get("destination") or blocks[1]
         break
+    def normalize_schedule_date(value):
+        if "wizz air" in lower and re.fullmatch(r"\d{1,2}/\d{1,2}/20\d{2}", str(value).strip()):
+            try:
+                return datetime.strptime(str(value).strip(), "%d/%m/%Y").date().isoformat()
+            except ValueError:
+                return ""
+        return _normalize_explicit_date(value)
+
     schedule = re.search(
         r"(\d{1,2}/\d{1,2}/20\d{2})\s+(\d{1,2}:\d{2})\s*/?\s*(\d{1,2}/\d{1,2}/20\d{2})\s+(\d{1,2}:\d{2})",
         source,
     )
     if schedule:
         departure_date, departure_time, arrival_date, arrival_time = schedule.groups()
-        result["departure_date"] = _normalize_explicit_date(departure_date)
-        result["arrival_date"] = _normalize_explicit_date(arrival_date)
+        result["departure_date"] = normalize_schedule_date(departure_date)
+        result["arrival_date"] = normalize_schedule_date(arrival_date)
         result["departure_time"] = departure_time.zfill(5)
         result["arrival_time"] = arrival_time.zfill(5)
 
@@ -928,16 +936,16 @@ def normalize_flight_fields(ai, text=""):
     )
     if compact_schedule:
         departure_date, departure_time, arrival_date, arrival_time = compact_schedule.groups()
-        result["departure_date"] = _normalize_explicit_date(departure_date)
-        result["arrival_date"] = _normalize_explicit_date(arrival_date)
+        result["departure_date"] = normalize_schedule_date(departure_date)
+        result["arrival_date"] = normalize_schedule_date(arrival_date)
         result["departure_time"] = departure_time.zfill(5)
         result["arrival_time"] = arrival_time.zfill(5)
     for line in raw_lines:
         numeric_dates = re.findall(r"\d{1,2}/\d{1,2}/20\d{2}", line)
         line_times = re.findall(r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b", line)
         if len(numeric_dates) >= 2 and len(line_times) >= 2:
-            result["departure_date"] = _normalize_explicit_date(numeric_dates[0])
-            result["arrival_date"] = _normalize_explicit_date(numeric_dates[1])
+            result["departure_date"] = normalize_schedule_date(numeric_dates[0])
+            result["arrival_date"] = normalize_schedule_date(numeric_dates[1])
             result["departure_time"] = line_times[0].zfill(5)
             result["arrival_time"] = line_times[1].zfill(5)
             break
