@@ -1213,8 +1213,21 @@ def city_display_name(value):
     return ""
 
 
+CITY_COUNTRIES = {
+    "מילאנו": "איטליה",
+    "רומא": "איטליה",
+    "פריז": "צרפת",
+    "לונדון": "בריטניה",
+    "מינכן": "גרמניה",
+    "בודפשט": "הונגריה",
+    "באטומי": "גיאורגיה",
+    "טביליסי": "גיאורגיה",
+}
+
+
 def trip_title_from_location(value, fallback="טיול חדש"):
-    return city_display_name(value) or fallback
+    city = city_display_name(value)
+    return f"{CITY_COUNTRIES[city]} {city}" if city in CITY_COUNTRIES else fallback
 def create_dated_trip_shell(trips, start, end, source, filename, title="טיול חדש"):
     start, end = validate_date_range(start, end)
     days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
@@ -1459,9 +1472,9 @@ def repair_trip_titles_from_bookings():
         if not rentals:
             continue
         location = str((rentals[0] or {}).get("pickup_location") or "")
-        city = city_display_name(location)
-        if city and str(trip.get("title") or "").startswith("טיול ·") and trip.get("title") != f"טיול · {city}":
-            trip["title"] = f"טיול · {city}"
+        title = trip_title_from_location(location)
+        if title != "טיול חדש" and str(trip.get("title") or "").startswith("טיול ·") and trip.get("title") != title:
+            trip["title"] = title
             changed = True
     if changed:
         save_trips(trips)

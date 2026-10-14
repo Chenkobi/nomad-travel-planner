@@ -9,7 +9,7 @@ import server
 class FutureBookingTests(unittest.TestCase):
     def test_city_display_name_uses_city_not_airport_rental_description(self):
         self.assertEqual(server.city_display_name("Milan Airport Malpensa T1 - Terminal 1, Car Rental Center"), "מילאנו")
-        self.assertEqual(server.trip_title_from_location("Milan Airport Malpensa T1"), "מילאנו")
+        self.assertEqual(server.trip_title_from_location("Milan Airport Malpensa T1"), "איטליה מילאנו")
 
     def test_future_flight_creates_trip_when_no_trip_exists(self):
         ai = {
