@@ -39,6 +39,7 @@ from booking_lifecycle import (
     validate_date_range,
     deduplicate_flights,
     flight_identity,
+    replace_booking,
 )
 from booking_types import infer_extended_type, normalize_insurance
 from event_contract import event_as_legacy_list, event_identity
@@ -802,6 +803,15 @@ def update_email_record(intake_id, **changes):
     return None
 
 
+def ingested_type_matches_booking(expected_type, trip):
+    expected = str(expected_type or "").strip().casefold()
+    trip = trip or {}
+    actual = str(trip.get("_ingested_type") or "").strip().casefold()
+    if not actual and trip.get("hotels"):
+        actual = "hotel"
+    return bool(expected and actual and expected == actual)
+
+
 def apply_review_decision(intake_id, decision, overrides=None):
     """Apply an explicit human review without deleting the source booking."""
     overrides = overrides if isinstance(overrides, dict) else {}
@@ -823,35 +833,39 @@ def apply_review_decision(intake_id, decision, overrides=None):
     trips = load_trips()
     trip = next((item for item in trips if str(item.get("id")) == str(record.get("trip_id"))), None)
     kind = allowed.get("type") or str(record.get("ingested_type") or "").strip().lower()
-    collection = {"flight": "flights", "hotel": "hotels", "train": "trains", "attraction": "attractions"}.get(kind)
+    collection = {"flight": "flights", "hotel": "hotels", "train": "trains", "attraction": "attractions", "car_rental": "rentals", "restaurant": "restaurants"}.get(kind)
     applied = False
     if trip and collection:
         candidates = trip.get(collection, []) or []
-        target = next((item for item in candidates if str(item.get("source_email_id")) == str(intake_id) or item.get("document") == record.get("document")), None)
+        exact = [item for item in candidates if str(item.get("source_email_id")) == str(intake_id) or item.get("document") == record.get("document")]
+        if len(exact) == 1:
+            target = exact[0]
+        else:
+            supplier = str(allowed.get("supplier") or record.get("provider") or "").strip().casefold()
+            date_key = {"flight": "departure_date", "hotel": "start", "train": "date", "attraction": "date", "car_rental": "pickup_date", "restaurant": "date"}.get(kind)
+            fallback = [item for item in candidates if supplier and str(item.get("supplier") or item.get("airline") or "").strip().casefold() == supplier]
+            if allowed.get("date") and date_key:
+                fallback = [item for item in fallback if str(item.get(date_key) or "") == allowed["date"]]
+            target = fallback[0] if len(fallback) == 1 else None
         if target:
+            replacement = dict(target)
             if allowed.get("date"):
-                date_key = {"flight": "departure_date", "hotel": "start", "train": "date", "attraction": "date"}[kind]
-                target[date_key] = allowed["date"]
+                replacement[{"flight": "departure_date", "hotel": "start", "train": "date", "attraction": "date", "car_rental": "pickup_date", "restaurant": "date"}[kind]] = allowed["date"]
             if allowed.get("time"):
-                time_key = {"flight": "departure_time", "hotel": "checkin_time", "train": "time", "attraction": "time"}[kind]
-                target[time_key] = allowed["time"]
+                replacement[{"flight": "departure_time", "hotel": "checkin_time", "train": "time", "attraction": "time", "car_rental": "pickup_time", "restaurant": "time"}[kind]] = allowed["time"]
             if kind == "flight":
-                if allowed.get("from"): target["origin"] = allowed["from"]
-                if allowed.get("to"): target["destination"] = allowed["to"]
-                if allowed.get("supplier"): target["airline"] = allowed["supplier"]
+                if allowed.get("from"): replacement["origin"] = allowed["from"]
+                if allowed.get("to"): replacement["destination"] = allowed["to"]
+                if allowed.get("supplier"): replacement["airline"] = allowed["supplier"]
             elif allowed.get("supplier"):
-                target["supplier"] = allowed["supplier"]
-            target["status"] = "confirmed"
-            target["review_decision"] = "approved"
-            applied = True
-            save_trips(trips)
-        elif kind == "flight" and all(allowed.get(key) for key in ("date", "time", "from", "to")):
-            # A human-approved flight can be added only from explicitly entered fields.
-            trip.setdefault("flights", []).append({"source_email_id": intake_id, "airline": allowed.get("supplier") or record.get("provider") or "", "departure_date": allowed["date"], "departure_time": allowed["time"], "origin": allowed["from"], "destination": allowed["to"], "status": "confirmed", "review_decision": "approved"})
-            applied = True
-            save_trips(trips)
-    if not applied:
-        record = update_email_record(intake_id, status="needs_review", review_decision="saved", review_reason="אישור לא בוצע: אין אירוע מזוהה או פרטי טיסה מלאים.") or record
+                replacement["supplier"] = allowed["supplier"]
+            applied = replace_booking(trips, {"trip": trip, "record": target}, kind, replacement, str(intake_id))
+            if applied:
+                save_trips(trips)
+    if applied:
+        record = update_email_record(intake_id, status="processed", review_decision="approved", review_reason="", processed_at=_utc_now().isoformat()) or record
+    else:
+        record = update_email_record(intake_id, status="needs_review", review_decision="saved", review_reason="אישור לא בוצע: אין התאמה חד-משמעית.") or record
     return record
 
 
@@ -1631,6 +1645,9 @@ def process_incoming_email(record):
                 body,
             ))
             trip = persisted_trip or create_trip_from_document(filename, path, "Email", ai_override=ai, context_text=context_text)
+            expected_type = provider_hint if provider_info.get("confidence", 0) >= 0.8 and provider_hint in _TELEMETRY_TYPES and provider_hint != "marketplace" else str(ai.get("type") or "").strip().lower()
+            if expected_type and not ingested_type_matches_booking(expected_type, trip):
+                raise ValueError("provider/category contradiction requires review")
             persisted_trips = load_trips()
             persisted_trip = next((item for item in persisted_trips if str(item.get("id")) == str(trip.get("id"))), trip)
             decorate_trip_booking(persisted_trip, ai, filename, intake_id)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import re
 
 
 RESTAURANT_MARKERS = (
@@ -98,9 +99,13 @@ def infer_extended_type(ai: dict[str, Any] | None, text: str = "") -> str | None
     if declared in {"insurance", "travel_insurance", "ביטוח"} or ai.get("policy_number") or ai.get("insurer"):
         return "insurance"
     lowered = str(text or "").lower()
+    # Footer links often contain generic insurance language unrelated to the
+    # booking. Only inspect the substantive document text for text inference.
+    lowered = re.split(r"\b(?:footer|unsubscribe|manage your preferences)\b", lowered, maxsplit=1)[0]
     if any(marker in lowered for marker in RESTAURANT_MARKERS):
         return "restaurant"
-    if any(marker in lowered for marker in INSURANCE_MARKERS):
+    insurance_context = any(marker in lowered for marker in ("travel insurance", "insurance policy", "policy number", "insured traveler", "coverage summary"))
+    if insurance_context and ("policy number" in lowered or "coverage" in lowered or "insured" in lowered or "valid from" in lowered or "valid to" in lowered):
         return "insurance"
     if any(marker in lowered for marker in FLIGHT_FACT_MARKERS):
         return "flight"

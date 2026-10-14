@@ -63,6 +63,16 @@ class BookingTypesTests(unittest.TestCase):
         self.assertEqual(value["what_to_do"], ["Call assistance"])
         self.assertNotIn("invented_advice", value)
 
+    def test_flight_facts_outrank_footer_only_insurance_language(self):
+        self.assertEqual(
+            infer_extended_type(
+                {},
+                "Flight number LX123. Departure airport ZRH. "
+                "Emergency assistance and insurance policy links in the footer.",
+            ),
+            "flight",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

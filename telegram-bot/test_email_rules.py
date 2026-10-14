@@ -50,6 +50,14 @@ class EmailRulesTests(unittest.TestCase):
             )
         )
 
+    def test_support_ticket_with_booking_substring_is_not_travel_email(self):
+        self.assertFalse(
+            looks_like_travel_email(
+                "Support ticket update",
+                "Tripwire booking-support case #123 remains open.",
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

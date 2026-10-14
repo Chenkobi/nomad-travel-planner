@@ -18,7 +18,13 @@ def _normalized(subject, body):
 
 def looks_like_travel_email(subject, body):
     text = _normalized(subject, body)
-    return any(marker in text for marker in TRAVEL_MARKERS)
+    if re.search(r"\b(?:support|helpdesk|ticket|case|issue)\b", text) and not re.search(
+        r"\b(?:hotel|flight|train|reservation|itinerary|check[- ]in|check[- ]out)\b", text
+    ):
+        return False
+    patterns = [rf"\b{re.escape(marker)}\b" for marker in TRAVEL_MARKERS if re.search(r"[a-z]", marker)]
+    patterns.extend(rf"{re.escape(marker)}" for marker in TRAVEL_MARKERS if not re.search(r"[a-z]", marker))
+    return any(re.search(pattern, text) for pattern in patterns)
 
 
 def _strong_confirmation_subject(subject):

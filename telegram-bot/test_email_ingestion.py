@@ -346,6 +346,39 @@ class EmailIngestionTests(unittest.TestCase):
                 server.TRIPS, server.UPLOADS = old_trips, old_uploads
                 server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index
 
+    def test_approved_modification_replaces_unique_original_booking(self):
+        with TemporaryDirectory() as tmp:
+            old_dir, old_index = self._configure_temp_email_dir(tmp)
+            old_trips = server.TRIPS
+            try:
+                server.TRIPS = Path(tmp) / 'trips.json'
+                server.save_email_index([{
+                    'id': 'email-mod-1', 'status': 'needs_review', 'trip_id': 'trip-1',
+                    'document': 'modified-hotel.pdf', 'ingested_type': 'hotel',
+                }])
+                server.save_trips([{
+                    'id': 'trip-1', 'hotels': [{
+                        'name': 'Hotel One', 'start': '2026-10-10', 'end': '2026-10-12',
+                        'supplier': 'Example Travel', 'confirmation_number': 'ABC123',
+                        'document': 'modified-hotel.pdf', 'status': 'confirmed',
+                    }], 'flights': [], 'trains': [], 'attractions': [], 'rentals': [],
+                }])
+                updated = server.apply_review_decision('email-mod-1', 'approve', {
+                    'type': 'hotel', 'date': '2026-10-11', 'supplier': 'Example Travel',
+                })
+                hotels = server.load_trips()[0]['hotels']
+                self.assertEqual(updated['status'], 'processed')
+                self.assertEqual(hotels[0]['status'], 'superseded')
+                self.assertEqual(hotels[1]['start'], '2026-10-11')
+                self.assertEqual(hotels[1]['status'], 'confirmed')
+            finally:
+                server.TRIPS = old_trips
+                server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index
+
+    def test_provider_type_contradiction_cannot_be_persisted_as_processed(self):
+        self.assertFalse(server.ingested_type_matches_booking('flight', {'_ingested_type': 'hotel'}))
+        self.assertTrue(server.ingested_type_matches_booking('hotel', {'_ingested_type': 'hotel'}))
+
 
 if __name__ == '__main__':
     unittest.main()
