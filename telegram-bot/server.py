@@ -458,11 +458,21 @@ def vapid_public_key():
 
 
 def save_push_subscription(subscription):
-    endpoint = str((subscription or {}).get("endpoint") or "").strip()
-    if not endpoint or len(endpoint) > 2048:
+    if not isinstance(subscription, dict):
+        raise ValueError("invalid_push_payload")
+    # Accept both PushSubscription.toJSON() and the explicit browser payload.
+    nested = subscription.get("subscription")
+    if isinstance(nested, dict):
+        subscription = nested
+    endpoint = str(subscription.get("endpoint") or "").strip()
+    if not endpoint or len(endpoint) > 4096:
         raise ValueError("invalid_push_endpoint")
-    keys = subscription.get("keys") if isinstance(subscription, dict) else {}
-    if not isinstance(keys, dict) or not keys.get("p256dh") or not keys.get("auth"):
+    keys = subscription.get("keys")
+    if not isinstance(keys, dict):
+        raise ValueError("invalid_push_keys_object")
+    p256dh = str(keys.get("p256dh") or "").strip()
+    auth = str(keys.get("auth") or "").strip()
+    if not p256dh or not auth:
         raise ValueError("invalid_push_keys")
     items = _load_json_list(PUSH_SUBSCRIPTIONS)
     items = [item for item in items if str(item.get("endpoint") or "") != endpoint]
