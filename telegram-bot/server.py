@@ -1180,6 +1180,41 @@ def dated_trip_target(trips, date_value):
     return next((trip for trip in trips if str(trip.get("start") or "") <= date_value <= str(trip.get("end") or "")), None)
 
 
+CITY_DISPLAY_NAMES = {
+    "milan": "מילאנו",
+    "rome": "רומא",
+    "paris": "פריז",
+    "london": "לונדון",
+    "munich": "מינכן",
+    "budapest": "בודפשט",
+    "batumi": "באטומי",
+    "tbilisi": "טביליסי",
+}
+AIRPORT_CITY_NAMES = {
+    "mxp": "מילאנו",
+    "lin": "מילאנו",
+    "fco": "רומא",
+    "cia": "רומא",
+    "cdg": "פריז",
+    "lhr": "לונדון",
+    "muc": "מינכן",
+}
+
+
+def city_display_name(value):
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    lowered = text.casefold()
+    for code, city in AIRPORT_CITY_NAMES.items():
+        if re.search(rf"\b{re.escape(code)}\b", lowered):
+            return city
+    for city, display in CITY_DISPLAY_NAMES.items():
+        if re.search(rf"\b{re.escape(city)}\b", lowered):
+            return display
+    return ""
+
+
+def trip_title_from_location(value, fallback="טיול חדש"):
+    return city_display_name(value) or fallback
 def create_dated_trip_shell(trips, start, end, source, filename, title="טיול חדש"):
     start, end = validate_date_range(start, end)
     days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
@@ -1416,7 +1451,24 @@ def process_incoming_email(record):
         if final_record_status in {"processed", "needs_review", "failed"}:
             label = "TRIPY: הזמנה נקלטה" if final_record_status == "processed" else "TRIPY: נדרשת בדיקה"
             send_push_notification(label, str(record.get("subject") or "מייל נסיעות"), tag=f"tripy-{intake_id}")
+def repair_trip_titles_from_bookings():
+    trips = load_trips()
+    changed = False
+    for trip in trips:
+        rentals = trip.get("rentals") or []
+        if not rentals:
+            continue
+        location = str((rentals[0] or {}).get("pickup_location") or "")
+        city = city_display_name(location)
+        if city and str(trip.get("title") or "").startswith("טיול ·") and trip.get("title") != f"טיול · {city}":
+            trip["title"] = f"טיול · {city}"
+            changed = True
+    if changed:
+        save_trips(trips)
+
+
 def resume_pending_email_processing():
+    repair_trip_titles_from_bookings()
     retryable_errors = {
         "ValueError: flight document missing unambiguous flight facts",
         "ValueError: car rental missing pickup location, time, date, or vehicle type",
@@ -1667,7 +1719,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         dropoff_date = normalize_date_value(str(ai.get("dropoff_date") or "").strip()) or str(ai.get("dropoff_date") or "").strip()
         if not all((pickup_date, pickup_time, pickup_location, vehicle_type)): raise ValueError("car rental missing pickup location, time, date, or vehicle type")
         trips = load_trips(); target = dated_trip_target(trips, pickup_date)
-        if not target: target = create_dated_trip_shell(trips, pickup_date, dropoff_date or pickup_date, source, filename, f"טיול · {pickup_location}")
+        if not target: target = create_dated_trip_shell(trips, pickup_date, dropoff_date or pickup_date, source, filename, f"טיול · {trip_title_from_location(pickup_location, 'טיול חדש')}")
         record = {"pickup_date":pickup_date,"pickup_time":pickup_time,"pickup_location":pickup_location,"vehicle_type":vehicle_type,"dropoff_date":dropoff_date,"dropoff_time":str(ai.get("dropoff_time") or "").strip(),"dropoff_location":str(ai.get("dropoff_location") or "").strip(),"document":filename}
         target.setdefault("rentals", []).append(record); target["rentals"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["rentals"]}.values()); preserve_booking_metadata(target, source, status=str(ai.get("status") or "confirmed").strip().lower()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"השכרת רכב · {vehicle_type}"; save_trips(trips)
         events = load_events(); title = f"איסוף רכב · {vehicle_type}"; details = f"{pickup_location} · שעה {pickup_time}"; event = [pickup_time, "🚗", title, details, "רכב", source, pickup_date, pickup_location]
