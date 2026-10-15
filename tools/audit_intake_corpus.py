@@ -187,6 +187,7 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
     counts = {key: Counter() for key in ("provider", "category", "intent", "validation", "trip", "persistence", "stage", "diagnosis")}
     facts = defaultdict(Counter)
     evidence = defaultdict(Counter)
+    provider_outcomes = Counter()
     for record in records:
         if record.get("_synthetic"):
             provider = {"provider": record["provider"], "category_hint": record["category"]}
@@ -201,6 +202,11 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
         field_presence = _facts(category, source, record)
         telemetry = _last_telemetry(record)
         validation, trip, persistence, stage, diagnosis = _outcomes(record, telemetry, field_presence)
+        status = str(record.get("status") or "unknown")
+        status = status if status in {"processed", "needs_review", "failed", "ignored", "received", "processing"} else "unknown"
+        reason_code = str(telemetry.get("validation_error_code") or "none").strip().lower()
+        reason_code = reason_code if reason_code in ALLOWED_ERRORS else "other_error"
+        provider_outcomes[f"{provider.get('provider', 'unknown')}|{category or 'unknown'}|{status}|{reason_code}"] += 1
         for key, value in (("provider", provider.get("provider", "unknown")), ("category", category or "unknown"),
                            ("intent", intent or "unknown"), ("validation", validation), ("trip", trip),
                            ("persistence", persistence), ("stage", stage), ("diagnosis", diagnosis)):
@@ -224,6 +230,7 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
         "persistence_result_counts": dict(sorted(counts["persistence"].items())),
         "failure_stage_counts": dict(sorted(counts["stage"].items())),
         "diagnosis_counts": dict(sorted(counts["diagnosis"].items())),
+        "provider_category_status_reason_counts": dict(sorted(provider_outcomes.items())),
     }
 
 
