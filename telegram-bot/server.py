@@ -75,6 +75,7 @@ PASSWORD_ITERATIONS = 310_000
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 SHARE_TTL_SECONDS = 7 * 24 * 60 * 60
 TELEGRAM_INTAKE = Path(os.getenv("TRIPY_TELEGRAM_INTAKE_FILE", ROOT / "telegram-intake.json"))
+NOTIFICATION_STATE = EMAIL_DIR / "notification-state.json"
 PUSH_SUBSCRIPTIONS = Path(os.getenv("TRIPY_PUSH_SUBSCRIPTIONS_FILE", EMAIL_DIR / "push-subscriptions.json"))
 VAPID_KEYS = Path(os.getenv("TRIPY_VAPID_KEYS_FILE", EMAIL_DIR / "vapid-keys.json"))
 VAPID_PRIVATE_KEY_FILE = Path(os.getenv("TRIPY_VAPID_PRIVATE_KEY_FILE", EMAIL_DIR / "vapid-private.pem"))
@@ -403,10 +404,27 @@ def _email_raw_source(record):
     return ""
 
 
+def _cleared_notification_ids():
+    try:
+        value = json.loads(NOTIFICATION_STATE.read_text(encoding="utf-8")) if NOTIFICATION_STATE.exists() else []
+        return set(str(item) for item in value) if isinstance(value, list) else set()
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
+def clear_notifications():
+    ids = {str(record.get("id") or "") for record in load_email_index() if record.get("id")}
+    _save_json_private(NOTIFICATION_STATE, sorted(ids))
+    return len(ids)
+
+
 def load_notifications(limit=50):
     """Return bounded, non-sensitive in-app notifications from intake outcomes."""
+    cleared = _cleared_notification_ids()
     notifications = []
     for record in load_email_index():
+        if str(record.get("id") or "") in cleared:
+            continue
         status = str(record.get("status") or "").strip()
         if status not in {"processed", "needs_review", "failed"}:
             continue
@@ -551,6 +569,25 @@ def save_email_index(items):
         handle.write(json.dumps(items, ensure_ascii=False, indent=2))
         tmp = Path(handle.name)
     tmp.replace(EMAIL_INDEX)
+
+
+def clear_email_intake_permanently():
+    with LOCK:
+        records = load_email_index()
+        removed = len(records)
+        for record in records:
+            folder = email_record_folder(record)
+            if folder.exists() and folder.is_dir():
+                shutil.rmtree(folder, ignore_errors=True)
+        save_email_index([])
+        if UPLOADS.exists():
+            for candidate in UPLOADS.glob("email_*_*.txt"):
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
+        _save_json_private(NOTIFICATION_STATE, [])
+        return removed
 
 
 def load_telegram_intake():
@@ -2630,6 +2667,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         if not self._authorized(path): return
+        if path == "/api/notifications/clear":
+            count = clear_notifications()
+            self._json(200, {"cleared": count}); return
+        if path == "/api/intake/clear":
+            removed = clear_email_intake_permanently()
+            self._json(200, {"deleted": removed, "intake_empty": not load_email_index()}); return
         if path in ("/api/auth/passkey/register/options", "/api/auth/passkey/register"):
             if _passkey_unavailable(self): return
             if not _session_user(self.headers):
