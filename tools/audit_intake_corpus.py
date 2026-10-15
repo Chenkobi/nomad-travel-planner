@@ -13,7 +13,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from email import policy
-from datetime import date
+from datetime import date, datetime, timezone
 from email.parser import BytesParser
 from pathlib import Path
 import sys
@@ -298,19 +298,53 @@ def _interval_gap(start, end, trip_start, trip_end) -> int:
     return 0
 
 
+def _timestamp(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _record_processing_time(record: dict):
+    return _timestamp(record.get("processed_at") or record.get("received_at") or record.get("created_at") or record.get("timestamp"))
+
+
+def _trip_creation_time(trip: dict):
+    created = _timestamp(trip.get("created_at") or trip.get("created"))
+    if created:
+        return created
+    identifier = str(trip.get("id") or "")
+    if re.fullmatch(r"\d{20}", identifier):
+        try:
+            return datetime.strptime(identifier, "%Y%m%d%H%M%S%f").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
 def _tripcom_window_diagnostic(record: dict, provider: str, category: str, status: str, trips: list[dict] | None, booking_visible):
     if provider != "trip.com":
         return None
     assigned_trip, booking = _booking_for_record(record, trips)
     start, end = _booking_date_range(category, booking)
+    processing_time = _record_processing_time(record)
     if trips is None or not start or not end:
         return {"category": category, "status": status, "booking_visible": booking_visible,
                 "booking_saved": bool(booking), "booking_dates_present": bool(start and end),
+                "processing_time_present": bool(processing_time),
                 "prior_policy_candidate_count": None, "seven_day_policy_candidate_count": None,
-                "country_gate_excluded_candidate_count": None}
+                "country_gate_excluded_candidate_count": None,
+                "candidate_created_before_processing_count": None,
+                "candidate_created_after_processing_count": None,
+                "candidate_creation_time_unknown_count": None}
     assigned_id = str(assigned_trip.get("id") or "") if assigned_trip else ""
     requested_country = _normalized_country(booking.get("country")) if booking else ""
     old_count = new_count = country_excluded = 0
+    created_before = created_after = created_unknown = 0
     for trip in trips:
         if not isinstance(trip, dict) or not _is_open_trip(trip):
             continue
@@ -322,6 +356,13 @@ def _tripcom_window_diagnostic(record: dict, provider: str, category: str, statu
         gap = _interval_gap(start, end, trip_start, trip_end)
         if gap <= 7:
             new_count += 1
+            candidate_time = _trip_creation_time(trip)
+            if not processing_time or not candidate_time:
+                created_unknown += 1
+            elif candidate_time <= processing_time:
+                created_before += 1
+            else:
+                created_after += 1
         if category == "hotel":
             overlaps = start <= trip_end and end >= trip_start
             countries = _trip_countries(trip)
@@ -333,9 +374,13 @@ def _tripcom_window_diagnostic(record: dict, provider: str, category: str, statu
             old_count += 1
     return {"category": category, "status": status, "booking_visible": booking_visible,
             "booking_saved": bool(booking), "booking_dates_present": True,
+            "processing_time_present": bool(processing_time),
             "prior_policy_candidate_count": old_count,
             "seven_day_policy_candidate_count": new_count,
-            "country_gate_excluded_candidate_count": country_excluded}
+            "country_gate_excluded_candidate_count": country_excluded,
+            "candidate_created_before_processing_count": created_before,
+            "candidate_created_after_processing_count": created_after,
+            "candidate_creation_time_unknown_count": created_unknown}
 
 
 def _read_trip_data(path: Path | None) -> list[dict] | None:

@@ -174,7 +174,7 @@ class AuditHarnessTests(unittest.TestCase):
             (intake / "index.json").write_text(json.dumps([{
                 "id": "private-mail", "from": "noreply@mailer.trip.com", "subject": "Trip.com booking confirmation",
                 "status": "processed", "intent": "confirmed", "ingested_type": "hotel",
-                "trip_id": "generated-trip", "document": "private-document.txt",
+                "trip_id": "generated-trip", "document": "private-document.txt", "processed_at": "2026-10-15T12:00:00+00:00",
                 "extraction_telemetry": [{"persistence_outcome": "created"}],
             }]), encoding="utf-8")
             trips_path = root / "trips.json"
@@ -182,7 +182,7 @@ class AuditHarnessTests(unittest.TestCase):
                 {"id": "generated-trip", "start": "2026-12-10", "end": "2026-12-13", "hotels": [
                     {"source_email_id": "private-mail", "document": "private-document.txt", "start": "2026-12-10", "end": "2026-12-13", "country": "Italy"}
                 ]},
-                {"id": "existing-trip", "start": "2026-12-11", "end": "2026-12-12", "destinations": [{"country": "Georgia"}], "hotels": [
+                {"id": "existing-trip", "start": "2026-12-11", "end": "2026-12-12", "created_at": "2026-10-14T12:00:00+00:00", "destinations": [{"country": "Georgia"}], "hotels": [
                     {"name": "Private Hotel", "start": "2026-12-11", "end": "2026-12-12", "country": "Georgia"}
                 ]},
             ]), encoding="utf-8")
@@ -196,6 +196,7 @@ class AuditHarnessTests(unittest.TestCase):
             self.assertTrue(summary["booking_visible"])
             self.assertEqual(summary["prior_policy_candidate_count"], 0)
             self.assertEqual(summary["seven_day_policy_candidate_count"], 1)
+            self.assertEqual(summary["candidate_created_before_processing_count"], 1)
             self.assertNotIn("private-mail", result.stdout)
             self.assertNotIn("Private Hotel", result.stdout)
             self.assertNotIn("Italy", result.stdout)
