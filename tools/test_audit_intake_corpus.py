@@ -10,6 +10,17 @@ TOOL = ROOT / "tools" / "audit_intake_corpus.py"
 
 
 class AuditHarnessTests(unittest.TestCase):
+    def test_missing_live_index_fails_closed_instead_of_using_synthetic(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, str(TOOL), tmp], cwd=ROOT,
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("live index is missing", result.stderr)
+
     def test_synthetic_report_has_at_least_fifty_records_and_required_aggregates(self):
         result = subprocess.run(
             [sys.executable, str(TOOL), "--synthetic", "--count", "60"],
@@ -22,6 +33,8 @@ class AuditHarnessTests(unittest.TestCase):
         self.assertEqual(report["source_mode"], "synthetic")
         self.assertEqual(report["records"], 60)
         for key in (
+            "status_counts",
+            "reason_counts",
             "provider_counts",
             "category_counts",
             "intent_counts",
@@ -35,6 +48,43 @@ class AuditHarnessTests(unittest.TestCase):
             self.assertIn(key, report)
         self.assertIn("processed_but_not_visible", report["diagnosis_counts"])
         self.assertIn("unknown_facts", report["diagnosis_counts"])
+        self.assertEqual(report["release_gate"]["false_processed_count"], 0)
+        self.assertGreater(report["release_gate"]["processed_but_not_visible_count"], 0)
+
+    def test_release_gate_is_machine_readable_and_fails_on_visibility_violation(self):
+        result = subprocess.run(
+            [sys.executable, str(TOOL), "--synthetic", "--count", "10", "--release-gate"],
+            cwd=ROOT, check=False, capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        gate = json.loads(result.stdout)
+        self.assertFalse(gate["passed"])
+        self.assertEqual(gate["source_mode"], "synthetic")
+        self.assertEqual(gate["false_processed_count"], 0)
+        self.assertGreater(gate["processed_but_not_visible_count"], 0)
+        self.assertNotIn("synthetic-trip-", result.stdout)
+
+    def test_release_gate_passes_for_clean_supplied_corpus(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            intake = Path(tmp)
+            (intake / "index.json").write_text(json.dumps([{
+                "id": "private-record", "status": "processed", "trip_id": "private-trip",
+                "processing_stage": "persisted", "ingested_type": "hotel",
+                "booking_facts": {"facts": {"hotel": "Private Hotel", "city": "Private City",
+                                               "check_in": "2026-01-01", "check_out": "2026-01-02"}},
+                "extraction_telemetry": [{"persistence_outcome": "created"}],
+            }]), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(TOOL), str(intake), "--release-gate"],
+                cwd=ROOT, check=True, capture_output=True, text=True,
+            )
+            gate = json.loads(result.stdout)
+            self.assertTrue(gate["passed"])
+            self.assertEqual(gate["false_processed_count"], 0)
+            self.assertEqual(gate["processed_but_not_visible_count"], 0)
+            self.assertNotIn("Private Hotel", result.stdout)
+            self.assertNotIn("private-record", result.stdout)
 
     def test_report_never_contains_fixture_identifiers_or_raw_fact_values(self):
         result = subprocess.run(

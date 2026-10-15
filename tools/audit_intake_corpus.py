@@ -3,7 +3,8 @@
 
 The tool reads local intake artifacts but emits counts and allow-listed labels only.
 It never emits message IDs, subjects, addresses, filenames, extracted values, or
-record samples. ``--synthetic`` is deterministic and is used when no index exists.
+record samples. ``--synthetic`` is deterministic and must be explicitly requested.
+Live mode is the default and fails closed when its index is missing or invalid.
 """
 from __future__ import annotations
 
@@ -184,7 +185,7 @@ def _synthetic_records(count: int) -> list[dict]:
 
 
 def build_report(records: list[dict], source_mode: str, intake_dir: Path | None = None) -> dict:
-    counts = {key: Counter() for key in ("provider", "category", "intent", "validation", "trip", "persistence", "stage", "diagnosis")}
+    counts = {key: Counter() for key in ("provider", "category", "intent", "status", "reason", "validation", "trip", "persistence", "stage", "diagnosis")}
     facts = defaultdict(Counter)
     evidence = defaultdict(Counter)
     provider_outcomes = Counter()
@@ -208,14 +209,17 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
         reason_code = reason_code if reason_code in ALLOWED_ERRORS else "other_error"
         provider_outcomes[f"{provider.get('provider', 'unknown')}|{category or 'unknown'}|{status}|{reason_code}"] += 1
         for key, value in (("provider", provider.get("provider", "unknown")), ("category", category or "unknown"),
-                           ("intent", intent or "unknown"), ("validation", validation), ("trip", trip),
-                           ("persistence", persistence), ("stage", stage), ("diagnosis", diagnosis)):
+                           ("intent", intent or "unknown"), ("status", status), ("reason", reason_code),
+                           ("validation", validation), ("trip", trip), ("persistence", persistence),
+                           ("stage", stage), ("diagnosis", diagnosis)):
             counts[key][str(value)] += 1
         for field, value in field_presence.items():
             facts[f"{category}.{field}"][value] += 1
             evidence[f"{category}.{field}"][value] += 1
             if str(telemetry.get("validation_error_field") or "").strip().lower() == field:
                 evidence[f"{category}.{field}.validation_error"]["present"] += 1
+    false_processed = counts["status"].get("processed", 0) - counts["validation"].get("passed", 0)
+    processed_but_not_visible = counts["trip"].get("processed_but_not_visible", 0)
     return {
         "schema_version": 1,
         "source_mode": source_mode,
@@ -223,6 +227,8 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
         "provider_counts": dict(sorted(counts["provider"].items())),
         "category_counts": dict(sorted(counts["category"].items())),
         "intent_counts": dict(sorted(counts["intent"].items())),
+        "status_counts": dict(sorted(counts["status"].items())),
+        "reason_counts": dict(sorted(counts["reason"].items())),
         "fact_presence": {key: dict(sorted(value.items())) for key, value in sorted(facts.items())},
         "field_evidence_counts": {key: dict(sorted(value.items())) for key, value in sorted(evidence.items())},
         "validation_result_counts": dict(sorted(counts["validation"].items())),
@@ -231,6 +237,12 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
         "failure_stage_counts": dict(sorted(counts["stage"].items())),
         "diagnosis_counts": dict(sorted(counts["diagnosis"].items())),
         "provider_category_status_reason_counts": dict(sorted(provider_outcomes.items())),
+        "release_gate": {
+            "source_mode": source_mode,
+            "false_processed_count": false_processed,
+            "processed_but_not_visible_count": processed_but_not_visible,
+            "passed": false_processed == 0 and processed_but_not_visible == 0,
+        },
     }
 
 
@@ -239,19 +251,29 @@ def main() -> int:
     parser.add_argument("intake_dir", nargs="?", type=Path, default=ROOT / "trip-email")
     parser.add_argument("--synthetic", action="store_true")
     parser.add_argument("--count", type=int, default=60)
+    parser.add_argument("--release-gate", action="store_true",
+                        help="emit only machine-readable gate results and fail on violations")
     args = parser.parse_args()
     index = args.intake_dir / "index.json"
-    use_synthetic = args.synthetic or not index.is_file()
-    if use_synthetic:
+    if args.synthetic:
         records, mode = _synthetic_records(max(1, args.count)), "synthetic"
+    elif not index.is_file():
+        print("live index is missing; pass --synthetic for local synthetic data", file=sys.stderr)
+        return 2
     else:
         try:
             raw = json.loads(index.read_text(encoding="utf-8"))
-            records, mode = (raw if isinstance(raw, list) else raw.get("records", [])), "live"
-        except (OSError, ValueError, AttributeError):
-            records, mode = _synthetic_records(max(1, args.count)), "synthetic_fallback"
-    print(json.dumps(build_report(records, mode, args.intake_dir), ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+            records = raw if isinstance(raw, list) else raw.get("records", [])
+            if not isinstance(records, list):
+                raise ValueError("records must be a list")
+            mode = "live"
+        except (OSError, ValueError, AttributeError, TypeError):
+            print("live index is invalid; refusing to run a synthetic fallback", file=sys.stderr)
+            return 2
+    report = build_report(records, mode, args.intake_dir)
+    output = report["release_gate"] if args.release_gate else report
+    print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0 if not args.release_gate or output["passed"] else 1
 
 
 if __name__ == "__main__":
