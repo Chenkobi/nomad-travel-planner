@@ -48,6 +48,37 @@ class AuditHarnessTests(unittest.TestCase):
         self.assertNotIn("Passenger Synthetic", result.stdout)
         self.assertNotIn("example.test", result.stdout)
 
+    def test_field_evidence_uses_nested_booking_facts_and_validation_field(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            intake = Path(tmp)
+            (intake / "index.json").write_text(json.dumps({"records": [{
+                "id": "private-record",
+                "status": "needs_review",
+                "processing_stage": "validating",
+                "ingested_type": "hotel",
+                "booking_facts": {"type": "hotel", "facts": {
+                    "hotel": "Private Hotel", "city": "Private City", "check_in": "2026-01-01"
+                }},
+                "extraction_telemetry": [{
+                    "normalized_type": "hotel",
+                    "validation_error_code": "validation_failed",
+                    "validation_error_field": "check_out",
+                    "persistence_outcome": "not_persisted",
+                }],
+            }] }), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(TOOL), str(intake)], cwd=ROOT,
+                check=True, capture_output=True, text=True,
+            )
+            report = json.loads(result.stdout)
+            self.assertEqual(report["fact_presence"]["hotel.hotel"], {"present": 1})
+            self.assertEqual(report["fact_presence"]["hotel.check_out"], {"missing": 1})
+            self.assertEqual(report["failure_stage_counts"], {"validating": 1})
+            self.assertEqual(report["field_evidence_counts"]["hotel.check_out.validation_error"], {"present": 1})
+            self.assertNotIn("Private Hotel", result.stdout)
+            self.assertNotIn("Private City", result.stdout)
+
     def test_live_index_is_read_without_emitting_record_detail(self):
         with self.subTest("fixture index"):
             import tempfile

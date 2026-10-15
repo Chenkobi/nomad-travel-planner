@@ -33,6 +33,10 @@ FACT_FIELDS = {
     "restaurant": ("restaurant_name", "date", "time"),
     "insurance": ("policy_number", "insurer", "valid_from", "valid_to"),
 }
+ALLOWED_CATEGORIES = set(FACT_FIELDS) | {"unknown"}
+ALLOWED_INTENTS = {"booking", "cancellation", "change", "receipt", "notification", "other", "confirmed", "cancelled", "modified", "unknown"}
+ALLOWED_ERRORS = {"source_unavailable", "provider_unavailable", "invalid_provider_response", "unsupported_type", "unknown_status", "validation_failed", "persistence_failed", "no_unique_match", "not_travel_email", "no_source", ""}
+FAILURE_STAGES = {"received", "extracting", "classifying", "validating", "persisting", "persisted", "failed", "unknown"}
 
 
 def _text(path: Path) -> str:
@@ -64,13 +68,22 @@ def _body_for_record(intake_dir: Path, record: dict) -> str:
 
 def _category(record: dict, provider: dict, source: str) -> str:
     hint = str(provider.get("category_hint") or "")
-    if hint and hint != "marketplace":
+    if hint in FACT_FIELDS:
         return hint
-    return infer_extended_type({}, source) or str(record.get("ingested_type") or "unknown") or "unknown"
+    declared = str(record.get("ingested_type") or "")
+    if declared in FACT_FIELDS:
+        return declared
+    inferred = infer_extended_type({}, source)
+    return inferred or "unknown"
 
 
 def _facts(category: str, source: str, record: dict) -> dict[str, str]:
     explicit = record.get("facts_present")
+    if not isinstance(explicit, dict):
+        envelope = record.get("booking_facts") or record.get("normalized_facts") or {}
+        explicit = envelope.get("facts") if isinstance(envelope, dict) else None
+    if not isinstance(explicit, dict):
+        explicit = record.get("facts")
     if isinstance(explicit, dict):
         return {field: "present" if bool(explicit.get(field)) else "missing" for field in FACT_FIELDS.get(category, ())}
     probe = {}
@@ -84,13 +97,33 @@ def _facts(category: str, source: str, record: dict) -> dict[str, str]:
 
 def _last_telemetry(record: dict) -> dict:
     history = record.get("extraction_telemetry") or []
+    if isinstance(history, dict):
+        return history
     return history[-1] if history and isinstance(history[-1], dict) else {}
+
+
+def _failure_stage(record: dict, telemetry: dict, status: str) -> str:
+    stage = str(record.get("processing_stage") or "").strip().lower()
+    if stage in FAILURE_STAGES:
+        return stage
+    error = str(telemetry.get("validation_error_code") or "").strip().lower()
+    inferred = {
+        "source_unavailable": "extracting", "provider_unavailable": "extracting",
+        "invalid_provider_response": "extracting", "not_travel_email": "classifying",
+        "unsupported_type": "classifying", "unknown_status": "validating",
+        "validation_failed": "validating", "persistence_failed": "persisting",
+    }.get(error)
+    if inferred:
+        return inferred
+    return "persisted" if status == "processed" else "unknown"
 
 
 def _outcomes(record: dict, telemetry: dict, facts: dict[str, str]) -> tuple[str, str, str, str, str]:
     status = str(record.get("status") or "unknown")
-    error = str(telemetry.get("validation_error_code") or "")
-    persistence = str(telemetry.get("persistence_outcome") or "") or ({"processed": "created"}.get(status, "not_persisted"))
+    raw_error = str(telemetry.get("validation_error_code") or "")
+    error = raw_error if raw_error in ALLOWED_ERRORS else "unknown_error"
+    raw_persistence = str(telemetry.get("persistence_outcome") or "")
+    persistence = raw_persistence if raw_persistence in {"created", "updated", "not_persisted", "failed", "ignored"} else ({"processed": "created"}.get(status, "not_persisted"))
     validation = "passed" if not error and status == "processed" else (error or "unknown")
     trip_id = bool(str(record.get("trip_id") or "").strip())
     if trip_id:
@@ -101,7 +134,7 @@ def _outcomes(record: dict, telemetry: dict, facts: dict[str, str]) -> tuple[str
         trip_match = "not_matched"
     else:
         trip_match = "unknown"
-    stage = str(record.get("processing_stage") or "unknown")
+    stage = _failure_stage(record, telemetry, status)
     missing = any(value == "missing" for value in facts.values())
     if missing and status != "processed" and not error:
         diagnosis = "unknown_facts"
@@ -153,6 +186,7 @@ def _synthetic_records(count: int) -> list[dict]:
 def build_report(records: list[dict], source_mode: str, intake_dir: Path | None = None) -> dict:
     counts = {key: Counter() for key in ("provider", "category", "intent", "validation", "trip", "persistence", "stage", "diagnosis")}
     facts = defaultdict(Counter)
+    evidence = defaultdict(Counter)
     for record in records:
         if record.get("_synthetic"):
             provider = {"provider": record["provider"], "category_hint": record["category"]}
@@ -161,7 +195,9 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
             source = _body_for_record(intake_dir or ROOT, record)
             provider = identify_email_provider(str(record.get("from") or ""), str(record.get("reply_to") or ""), str(record.get("subject") or ""), source)
         category = record.get("category") or _category(record, provider, source)
+        category = category if category in ALLOWED_CATEGORIES else "unknown"
         intent = record.get("intent") or classify_email_intent(str(record.get("subject") or ""), source)
+        intent = intent if intent in ALLOWED_INTENTS else "unknown"
         field_presence = _facts(category, source, record)
         telemetry = _last_telemetry(record)
         validation, trip, persistence, stage, diagnosis = _outcomes(record, telemetry, field_presence)
@@ -171,6 +207,9 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
             counts[key][str(value)] += 1
         for field, value in field_presence.items():
             facts[f"{category}.{field}"][value] += 1
+            evidence[f"{category}.{field}"][value] += 1
+            if str(telemetry.get("validation_error_field") or "").strip().lower() == field:
+                evidence[f"{category}.{field}.validation_error"]["present"] += 1
     return {
         "schema_version": 1,
         "source_mode": source_mode,
@@ -179,6 +218,7 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
         "category_counts": dict(sorted(counts["category"].items())),
         "intent_counts": dict(sorted(counts["intent"].items())),
         "fact_presence": {key: dict(sorted(value.items())) for key, value in sorted(facts.items())},
+        "field_evidence_counts": {key: dict(sorted(value.items())) for key, value in sorted(evidence.items())},
         "validation_result_counts": dict(sorted(counts["validation"].items())),
         "trip_match_result_counts": dict(sorted(counts["trip"].items())),
         "persistence_result_counts": dict(sorted(counts["persistence"].items())),
