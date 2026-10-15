@@ -157,6 +157,8 @@ def main() -> int:
                     "dates": len(_explicit_date_tokens(source_text)),
                     "route_labels": sum(len(_label_values(source_text, labels)) for labels in (("from", "origin", "departure airport"), ("to", "destination", "arrival airport"), ("departure date", "date"))),
                 },
+                "line_shapes": redacted_line_shapes(source_text) if provider["provider"] == "booking.com" else [],
+                "attachment_extensions": sorted({Path(str(item.get("filename") or "")).suffix.lower() for item in record.get("attachments") or []}),
                 "review_reason": str(record.get("review_reason") or "")[:120],
                 "processing_error": str(record.get("processing_error") or "")[:120],
                 "telemetry_error": str(telemetry.get("validation_error_code") or ""),
