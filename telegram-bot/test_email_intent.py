@@ -64,6 +64,14 @@ class EmailIntentTests(unittest.TestCase):
         self.assertEqual(trip["provider"], "trip.com")
         self.assertEqual(trip["confidence"], 0.99)
 
+    def test_booking_confirmed_duca_daosta_hotel_is_not_restaurant(self):
+        provider = {"provider": "booking.com"}
+        result = server.guard_marketplace_category(
+            {"type": "restaurant"}, provider,
+            "Thanks! Your booking is confirmed at Duca D'Aosta Hotel",
+        )
+        self.assertEqual(result["type"], "hotel")
+
     def test_booking_category_guard_rejects_footer_restaurant_guess(self):
         provider = {"provider": "booking.com"}
         hotel = server.guard_marketplace_category({"type": "restaurant"}, provider, "Booking confirmation Check-in Thu December 10 2026 Check-out Friday December 11 2026 Restaurant recommendations")

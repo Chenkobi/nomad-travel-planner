@@ -18,6 +18,12 @@ class SemanticHotelTests(unittest.TestCase):
   self.assertEqual(r["facts"]["check_in"]["value"], "2027-05-05")
   self.assertEqual(r["facts"]["check_out"]["value"], "2027-05-08")
 
+ def test_free_form_confirmation_extracts_hotel_name_without_dates(self):
+  r=understand_hotel_reservation("Booking confirmation", "Thanks! Your booking is confirmed at Duca D'Aosta Hotel")
+  self.assertEqual(r["intent"], "reservation")
+  self.assertEqual(r["facts"]["hotel"]["value"], "Duca D'Aosta Hotel")
+  self.assertEqual(r["decision"], "review")
+
  def test_recommendation_policy_rejected(self):
   self.assertEqual(understand_hotel_reservation("Recommended hotels","Explore recommended hotels. No booking has been made.")["decision"],"reject")
   self.assertEqual(understand_hotel_reservation("Hotel cancellation policy","Bookings may be cancelled before arrival.")["intent"],"policy")

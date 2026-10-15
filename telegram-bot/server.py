@@ -1522,6 +1522,42 @@ def dated_trip_target(trips, date_value):
     return next((trip for trip in trips if str(trip.get("start") or "") <= date_value <= str(trip.get("end") or "")), None)
 
 
+def hotel_trip_target(trips, start, end, country=""):
+    """Match hotel date ranges to one overlapping trip, preferring compatible country evidence."""
+    try:
+        booking_start = datetime.fromisoformat(str(start)).date()
+        booking_end = datetime.fromisoformat(str(end)).date()
+    except (TypeError, ValueError):
+        return None
+    requested_country = re.sub(r"\s+", " ", str(country or "")).strip().casefold()
+    candidates = []
+    for trip in trips:
+        try:
+            trip_start = datetime.fromisoformat(str(trip.get("start") or "")).date()
+            trip_end = datetime.fromisoformat(str(trip.get("end") or "")).date()
+        except (TypeError, ValueError):
+            continue
+        if booking_start > trip_end or booking_end < trip_start:
+            continue
+        countries = {
+            re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+            for value in ([d.get("country") for d in trip.get("destinations", []) if isinstance(d, dict)]
+                          + [h.get("country") for h in trip.get("hotels", []) if isinstance(h, dict)])
+            if str(value or "").strip()
+        }
+        if requested_country and countries and requested_country not in countries:
+            continue
+        candidates.append(trip)
+    if len(candidates) == 1:
+        return candidates[0]
+    start_containing = [trip for trip in candidates if str(trip.get("start") or "") <= booking_start.isoformat() <= str(trip.get("end") or "")]
+    if len(start_containing) == 1:
+        return start_containing[0]
+    if len(candidates) > 1:
+        raise ValueError("hotel dates overlap multiple trips; destination cannot be matched uniquely")
+    return None
+
+
 CITY_DISPLAY_NAMES = {
     "milan": "מילאנו",
     "rome": "רומא",
@@ -2007,6 +2043,11 @@ def guard_marketplace_category(ai, provider_info, text=""):
     if str(result.get("type") or "").strip().casefold() != "restaurant":
         return result
     lowered = str(text or "").casefold()
+    semantic_hotel = understand_hotel_reservation(body=text)
+    if (semantic_hotel["intent"] == "reservation"
+            and semantic_hotel["facts"]["hotel"]["value"]):
+        result["type"] = "hotel"
+        return result
     lodging_markers = ("hotel", "resort", "property", "check-in", "check-out", "room", "accommodation")
     lodging_score = sum(marker in lowered for marker in lodging_markers)
     restaurant_fact_markers = ("table reservation", "restaurant name", "dining reservation", "party size", "reservation time")
@@ -2223,7 +2264,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
     new_start, new_end = as_date(start), as_date(end)
     match = next((existing for existing in trips if existing.get("document") == filename or filename in existing.get("documents", [])), None)
     if not match and start:
-        match = dated_trip_target(trips, start)
+        match = hotel_trip_target(trips, start, end, ai_country or (cities[0][1] if cities else ""))
     if match:
         old_start, old_end = as_date(match.get("start")), as_date(match.get("end"))
         merged_start = min(x for x in (old_start, new_start) if x)

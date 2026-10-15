@@ -242,6 +242,52 @@ Drop-off location: Milan Airport Malpensa T1""", encoding="utf-8")
             finally:
                 server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
 
+    def test_hotel_whose_dates_overlap_existing_trip_is_attached_and_trip_window_expands(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                server.DATA = root / 'events.json'; server.TRIPS = root / 'trips.json'; server.UPLOADS = root / 'uploads'
+                existing = {
+                    'id': 'italy-trip', 'title': 'איטליה · Courmayeur',
+                    'start': '2026-12-11', 'end': '2026-12-12', 'days': 2,
+                    'source': 'Email', 'documents': ['courmayeur.pdf'],
+                    'document_titles': {'courmayeur.pdf': 'אישור מלון'},
+                    'destinations': [{'city': 'Courmayeur', 'country': 'Italy'}],
+                    'hotels': [{'name': 'Grand Hotel Courmayeur', 'start': '2026-12-11', 'end': '2026-12-12'}],
+                    'flights': [], 'trains': [], 'attractions': [], 'rentals': [], 'restaurants': [],
+                }
+                server.save_trips([existing]); server.save_events([])
+                path = root / 'milan-hotel.txt'
+                path.write_text('NH Collection Milano. Check-in: December 10, 2026. Check-out: December 13, 2026.', encoding='utf-8')
+                result = server.create_trip_from_document(
+                    'milan-hotel.txt', path, source='Email',
+                    ai_override={'type': 'hotel', 'status': 'confirmed', 'hotel': 'NH Collection Milano', 'city': 'Milan', 'country': 'Italy', 'check_in': '2026-12-10', 'check_out': '2026-12-13'},
+                )
+                saved = json.loads(server.TRIPS.read_text())
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(result['id'], 'italy-trip')
+                self.assertEqual((saved[0]['start'], saved[0]['end']), ('2026-12-10', '2026-12-13'))
+                self.assertIn('NH Collection Milano', [hotel['name'] for hotel in saved[0]['hotels']])
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
+
+    def test_hotel_overlapping_trip_in_another_country_creates_separate_trip(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                server.DATA = root / 'events.json'; server.TRIPS = root / 'trips.json'; server.UPLOADS = root / 'uploads'
+                existing = {'id': 'other-trip', 'title': 'גיאורגיה · באטומי', 'start': '2026-12-11', 'end': '2026-12-12', 'days': 2, 'documents': [], 'destinations': [{'city': 'Batumi', 'country': 'Georgia'}], 'hotels': [], 'flights': [], 'trains': [], 'attractions': [], 'rentals': [], 'restaurants': []}
+                server.save_trips([existing]); server.save_events([])
+                path = root / 'milan-hotel.txt'
+                path.write_text('NH Collection Milano. Check-in: December 10, 2026. Check-out: December 13, 2026.', encoding='utf-8')
+                result = server.create_trip_from_document('milan-hotel.txt', path, source='Email', ai_override={'type': 'hotel', 'status': 'confirmed', 'hotel': 'NH Collection Milano', 'city': 'Milan', 'country': 'Italy', 'check_in': '2026-12-10', 'check_out': '2026-12-13'})
+                self.assertNotEqual(result['id'], 'other-trip')
+                self.assertEqual(len(json.loads(server.TRIPS.read_text())), 2)
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
+
     def test_hotel_documents_within_fourteen_days_are_not_broadly_merged(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

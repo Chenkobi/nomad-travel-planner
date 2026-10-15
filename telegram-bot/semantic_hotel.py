@@ -43,6 +43,16 @@ def understand_hotel_reservation(subject="",body=""):
     strong=bool(re.search(r"\b(?:reservation|booking|confirmation|confirmed|itinerary|voucher)\b|הזמנה|אישור",combined)); rec=bool(re.search(r"\b(?:recommended|recommendations?|discover|explore|inspiration|guide|suggested)\b|המלצות",combined)); policy=bool(re.search(r"\b(?:policy|policies|terms and conditions|cancellation policy|privacy policy)\b|מדיניות|תנאים",combined)); no=bool(re.search(r"\b(?:no booking|not been booked|not a reservation)\b|לא בוצעה הזמנה",combined))
     facts={}; raw,line=_find("hotel",lines); facts["hotel"]=_fact(raw or None,line,.98 if raw else 0); raw,line=_find("city",lines); facts["city"]=_fact(raw or None,line,.95 if raw else 0)
     if not facts["hotel"]["value"]:
+        source = subject + "\n" + "\n".join(lines)
+        lowered_source = source.casefold()
+        for marker in ("booking is confirmed at ", "your booking is confirmed at ", "reservation is confirmed at ", "booking confirmed at "):
+            position = lowered_source.find(marker)
+            if position >= 0:
+                value = source[position + len(marker):].split(".", 1)[0].split(",", 1)[0].strip()
+                if value:
+                    facts["hotel"] = _fact(value, source[position:position + len(marker) + len(value)], .93)
+                    break
+    if not facts["hotel"]["value"]:
         match=re.search(r"\b(?:reservation|booking)\s+at\s+(.+?)(?=\s+is\s+(?:confirmed|booked)|[,.]\s|$)", subject+"\n"+"\n".join(lines), re.I)
         if match:
             facts["hotel"]=_fact(match.group(1).strip(), match.group(0), .93)
