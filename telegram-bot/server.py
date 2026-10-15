@@ -1314,15 +1314,21 @@ def normalize_flight_segments(ai, text=""):
     return [normalize_flight_fields(ai or {}, text)]
 
 
+def combine_email_body_parts(text, html=""):
+    plain = str(text or "").strip()
+    rendered = html_to_text(str(html or "")).strip() if str(html or "").strip() else ""
+    if plain and rendered and rendered != plain:
+        return f"{plain}\n\n--- HTML body ---\n{rendered}"
+    return plain or rendered
+
+
 def email_body_text(record):
     folder = email_record_folder(record)
     text_path = folder / "body.txt"
     text = text_path.read_text(encoding="utf-8", errors="replace") if text_path.is_file() else ""
-    if text.strip():
-        return text
     html_path = folder / "body.html"
     html = html_path.read_text(encoding="utf-8", errors="replace") if html_path.is_file() else ""
-    return html_to_text(html)
+    return combine_email_body_parts(text, html)
 
 
 def prepare_email_source(record):

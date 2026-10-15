@@ -48,6 +48,14 @@ class EmailIntentTests(unittest.TestCase):
         text = """Booking.com reservation confirmation\nProperty: Batumi Hotel\nCheck-in: Tue, 20 Oct 2026\nCheck-out: Thu, 22 Oct 2026\nRoom: Double room\nRestaurant recommendations"""
         self.assertEqual(server.infer_document_type({"type": "restaurant"}, text), "hotel")
 
+    def test_email_source_combines_plain_and_html_parts_for_extraction(self):
+        combined = server.combine_email_body_parts(
+            "Booking confirmation\nRestaurant recommendations",
+            "<html><body><b>Property:</b> Batumi Hotel<br>Check-in: 20 Oct 2026<br>Check-out: 22 Oct 2026<br>Room: Double</body></html>",
+        )
+        self.assertIn("Property:", combined)
+        self.assertIn("Restaurant recommendations", combined)
+
     def test_provider_identity_detects_sixt_and_car_rental(self):
         result = identify_email_provider(
             sender="noreply@sixt.com",
