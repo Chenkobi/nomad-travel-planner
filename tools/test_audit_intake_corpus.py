@@ -165,6 +165,42 @@ class AuditHarnessTests(unittest.TestCase):
             self.assertNotIn("Private Hotel", result.stdout)
             self.assertNotIn("Private City", result.stdout)
 
+    def test_tripcom_match_diagnostic_compares_old_and_seven_day_policies_without_values(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            intake = root / "email"
+            intake.mkdir()
+            (intake / "index.json").write_text(json.dumps([{
+                "id": "private-mail", "from": "noreply@mailer.trip.com", "subject": "Trip.com booking confirmation",
+                "status": "processed", "intent": "confirmed", "ingested_type": "hotel",
+                "trip_id": "generated-trip", "document": "private-document.txt",
+                "extraction_telemetry": [{"persistence_outcome": "created"}],
+            }]), encoding="utf-8")
+            trips_path = root / "trips.json"
+            trips_path.write_text(json.dumps([
+                {"id": "generated-trip", "start": "2026-12-10", "end": "2026-12-13", "hotels": [
+                    {"source_email_id": "private-mail", "document": "private-document.txt", "start": "2026-12-10", "end": "2026-12-13", "country": "Italy"}
+                ]},
+                {"id": "existing-trip", "start": "2026-12-11", "end": "2026-12-12", "destinations": [{"country": "Georgia"}], "hotels": [
+                    {"name": "Private Hotel", "start": "2026-12-11", "end": "2026-12-12", "country": "Georgia"}
+                ]},
+            ]), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(TOOL), str(intake), "--latest-only", "--trip-data-file", str(trips_path)],
+                cwd=ROOT, check=True, capture_output=True, text=True,
+            )
+            summary = json.loads(result.stdout)["latest_tripcom_booking_summary"]
+            self.assertEqual(summary["category"], "hotel")
+            self.assertEqual(summary["status"], "processed")
+            self.assertTrue(summary["booking_visible"])
+            self.assertEqual(summary["prior_policy_candidate_count"], 0)
+            self.assertEqual(summary["seven_day_policy_candidate_count"], 1)
+            self.assertNotIn("private-mail", result.stdout)
+            self.assertNotIn("Private Hotel", result.stdout)
+            self.assertNotIn("Italy", result.stdout)
+            self.assertNotIn("Georgia", result.stdout)
+
     def test_latest_cancellation_record_exposes_only_safe_intent_conflict_and_match_stage(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:

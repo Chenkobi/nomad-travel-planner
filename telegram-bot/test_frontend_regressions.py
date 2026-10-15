@@ -7,6 +7,15 @@ INDEX = (ROOT / "index.html").read_text(encoding="utf-8")
 
 
 class FrontendRegressionTests(unittest.TestCase):
+    def test_user_visible_dates_use_day_month_year_format(self):
+        self.assertIn("function formatDisplayDate(value)", INDEX)
+        self.assertIn("function formatDateText(value)", INDEX)
+        self.assertIn("formatDisplayDate(t.start)", INDEX)
+        self.assertIn('<bdi dir="ltr">', INDEX)
+        self.assertIn("formatDateText(e[3])", INDEX)
+        self.assertIn("formatDateText((x.start||'')+' – '+(x.end||''))", INDEX)
+        self.assertIn("esc(formatDateText(value))", INDEX)
+
     def test_trip_title_has_edit_action_and_custom_title_precedence(self):
         self.assertIn('id="editTripTitle"', INDEX)
         self.assertIn("if(t?.title_custom&&t?.title)return String(t.title)", INDEX)

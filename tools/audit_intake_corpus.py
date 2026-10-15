@@ -13,6 +13,7 @@ import json
 import re
 from collections import Counter, defaultdict
 from email import policy
+from datetime import date
 from email.parser import BytesParser
 from pathlib import Path
 import sys
@@ -214,6 +215,129 @@ def _booking_visibility(record: dict, trips: list[dict] | None) -> tuple[bool | 
     return True, visible
 
 
+def _date_value(value):
+    text = str(value or "").strip()
+    try:
+        return date.fromisoformat(text[:10]) if text else None
+    except ValueError:
+        return None
+
+
+def _booking_for_record(record: dict, trips: list[dict] | None):
+    if not trips:
+        return None, None
+    trip_id = str(record.get("trip_id") or "").strip()
+    email_id = str(record.get("id") or "").strip()
+    document = str(record.get("document") or "").strip()
+    category = str(record.get("ingested_type") or record.get("category") or "").casefold()
+    collection = {"flight": "flights", "hotel": "hotels", "train": "trains", "car_rental": "rentals",
+                  "restaurant": "restaurants", "attraction": "attractions", "insurance": "insurance"}.get(category)
+    trip = next((item for item in trips if isinstance(item, dict) and str(item.get("id") or "") == trip_id), None)
+    if not trip or not collection:
+        return trip, None
+    bookings = trip.get(collection) or []
+    if isinstance(bookings, dict):
+        bookings = [bookings]
+    for booking in bookings:
+        if not isinstance(booking, dict):
+            continue
+        if (email_id and str(booking.get("source_email_id") or "") == email_id) or (document and str(booking.get("document") or "") == document):
+            return trip, booking
+    return trip, None
+
+
+def _booking_date_range(category: str, booking: dict | None):
+    if not booking:
+        return None, None
+    category = str(category or "").casefold()
+    if category == "hotel":
+        start = booking.get("start") or booking.get("check_in")
+        end = booking.get("end") or booking.get("check_out") or start
+    elif category == "flight":
+        start = booking.get("departure_date") or booking.get("date")
+        end = booking.get("arrival_date") or start
+    elif category == "car_rental":
+        start = booking.get("pickup_date")
+        end = booking.get("dropoff_date") or start
+    elif category == "insurance":
+        start = booking.get("valid_from")
+        end = booking.get("valid_to") or start
+    else:
+        start = booking.get("date") or booking.get("departure_date")
+        end = start
+    start_date, end_date = _date_value(start), _date_value(end)
+    if not start_date or not end_date or end_date < start_date:
+        return None, None
+    return start_date, end_date
+
+
+def _trip_interval(trip: dict):
+    start, end = _date_value(trip.get("start")), _date_value(trip.get("end"))
+    return (start, end) if start and end and end >= start else (None, None)
+
+
+def _is_open_trip(trip: dict) -> bool:
+    return not trip.get("closed") and not trip.get("archived") and str(trip.get("status") or "").strip().casefold() not in {"closed", "completed", "archived"}
+
+
+def _normalized_country(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+
+def _trip_countries(trip: dict) -> set[str]:
+    values = ([item.get("country") for item in trip.get("destinations", []) if isinstance(item, dict)]
+              + [item.get("country") for item in (trip.get("hotels") or []) if isinstance(item, dict)])
+    return {_normalized_country(value) for value in values if _normalized_country(value)}
+
+
+def _interval_gap(start, end, trip_start, trip_end) -> int:
+    if trip_end < start:
+        return (start - trip_end).days
+    if trip_start > end:
+        return (trip_start - end).days
+    return 0
+
+
+def _tripcom_window_diagnostic(record: dict, provider: str, category: str, status: str, trips: list[dict] | None, booking_visible):
+    if provider != "trip.com":
+        return None
+    assigned_trip, booking = _booking_for_record(record, trips)
+    start, end = _booking_date_range(category, booking)
+    if trips is None or not start or not end:
+        return {"category": category, "status": status, "booking_visible": booking_visible,
+                "booking_saved": bool(booking), "booking_dates_present": bool(start and end),
+                "prior_policy_candidate_count": None, "seven_day_policy_candidate_count": None,
+                "country_gate_excluded_candidate_count": None}
+    assigned_id = str(assigned_trip.get("id") or "") if assigned_trip else ""
+    requested_country = _normalized_country(booking.get("country")) if booking else ""
+    old_count = new_count = country_excluded = 0
+    for trip in trips:
+        if not isinstance(trip, dict) or not _is_open_trip(trip):
+            continue
+        if assigned_id and str(trip.get("id") or "") == assigned_id:
+            continue
+        trip_start, trip_end = _trip_interval(trip)
+        if not trip_start or not trip_end:
+            continue
+        gap = _interval_gap(start, end, trip_start, trip_end)
+        if gap <= 7:
+            new_count += 1
+        if category == "hotel":
+            overlaps = start <= trip_end and end >= trip_start
+            countries = _trip_countries(trip)
+            if overlaps and requested_country and countries and requested_country not in countries:
+                country_excluded += 1
+            elif overlaps:
+                old_count += 1
+        elif trip_start <= start <= trip_end:
+            old_count += 1
+    return {"category": category, "status": status, "booking_visible": booking_visible,
+            "booking_saved": bool(booking), "booking_dates_present": True,
+            "prior_policy_candidate_count": old_count,
+            "seven_day_policy_candidate_count": new_count,
+            "country_gate_excluded_candidate_count": country_excluded}
+
+
 def _read_trip_data(path: Path | None) -> list[dict] | None:
     if path is None:
         return None
@@ -233,6 +357,8 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
     provider_outcomes = Counter()
     latest_record_summary = None
     latest_order = None
+    latest_tripcom_summary = None
+    latest_tripcom_order = None
     for index, record in enumerate(records):
         if record.get("_synthetic"):
             provider = {"provider": record["provider"], "category_hint": record["category"]}
@@ -282,6 +408,16 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
                 "failed_field": str(telemetry.get("validation_error_field") or "") if str(telemetry.get("validation_error_field") or "") in FACT_FIELDS.get(category, ()) else "",
                 "missing_fields": sorted(field for field, presence in field_presence.items() if presence == "missing"),
             }
+        if str(provider.get("provider") or "").casefold() == "trip.com" and not record.get("_synthetic"):
+            if latest_tripcom_order is None or order > latest_tripcom_order:
+                latest_tripcom_order = order
+                latest_tripcom_summary = {
+                    "provider": "trip.com",
+                    "intent": intent,
+                    "failure_code": reason_code,
+                    "trip_id_resolves": trip_id_resolves,
+                    **(_tripcom_window_diagnostic(record, "trip.com", category, status, trip_data, booking_visible) or {}),
+                }
         for key, value in (("provider", provider.get("provider", "unknown")), ("category", category or "unknown"),
                            ("intent", intent or "unknown"), ("status", status), ("reason", reason_code),
                            ("validation", validation), ("trip", trip), ("persistence", persistence),
@@ -294,6 +430,8 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
                 evidence[f"{category}.{field}.validation_error"]["present"] += 1
     false_processed = counts["status"].get("processed", 0) - counts["validation"].get("passed", 0)
     processed_but_not_visible = counts["trip"].get("processed_but_not_visible", 0)
+    if latest_record_summary is not None:
+        latest_record_summary["latest_tripcom_booking_summary"] = latest_tripcom_summary
     return {
         "schema_version": 1,
         "source_mode": source_mode,

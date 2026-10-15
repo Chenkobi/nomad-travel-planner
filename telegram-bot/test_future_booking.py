@@ -242,6 +242,32 @@ Drop-off location: Milan Airport Malpensa T1""", encoding="utf-8")
             finally:
                 server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
 
+    def test_dated_trip_target_matches_seven_day_margin_and_ignores_country(self):
+        trip = {'id': 'existing-trip', 'start': '2026-12-11', 'end': '2026-12-12', 'destinations': [{'country': 'Georgia'}], 'hotels': [{'start': '2026-12-11', 'end': '2026-12-12'}]}
+        self.assertIs(server.dated_trip_target([trip], '2026-12-04', '2026-12-04'), trip)
+        self.assertIs(server.dated_trip_target([trip], '2026-12-19', '2026-12-19'), trip)
+        self.assertIsNone(server.dated_trip_target([trip], '2026-12-03', '2026-12-03'))
+        self.assertIsNone(server.dated_trip_target([trip], '2026-12-20', '2026-12-20'))
+
+    def test_dated_trip_target_does_not_create_when_multiple_equally_near_trips_exist(self):
+        trips = [
+            {'id': 'left', 'start': '2026-12-01', 'end': '2026-12-04', 'hotels': [{'start': '2026-12-01', 'end': '2026-12-04'}]},
+            {'id': 'right', 'start': '2026-12-16', 'end': '2026-12-19', 'hotels': [{'start': '2026-12-16', 'end': '2026-12-19'}]},
+        ]
+        with self.assertRaisesRegex(ValueError, 'multiple trips'):
+            server.dated_trip_target(trips, '2026-12-10', '2026-12-10')
+
+    def test_hotel_within_seven_days_attaches_even_when_country_label_differs(self):
+        existing = {
+            'id': 'existing-trip', 'start': '2026-12-11', 'end': '2026-12-12',
+            'destinations': [{'city': 'Courmayeur', 'country': 'איטליה'}],
+            'hotels': [{'name': 'Existing stay', 'start': '2026-12-11', 'end': '2026-12-12'}],
+        }
+        self.assertIs(server.hotel_trip_target([existing], '2026-12-04', '2026-12-04', 'Italy'), existing)
+        self.assertIs(server.hotel_trip_target([existing], '2026-12-19', '2026-12-19', 'Italy'), existing)
+        self.assertIsNone(server.hotel_trip_target([existing], '2026-12-03', '2026-12-03', 'Italy'))
+        self.assertIsNone(server.hotel_trip_target([existing], '2026-12-20', '2026-12-20', 'Italy'))
+
     def test_hotel_whose_dates_overlap_existing_trip_is_attached_and_trip_window_expands(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -272,19 +298,51 @@ Drop-off location: Milan Airport Malpensa T1""", encoding="utf-8")
             finally:
                 server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
 
-    def test_hotel_overlapping_trip_in_another_country_creates_separate_trip(self):
+    def test_flight_seven_days_after_existing_booking_attaches_and_expands_same_trip(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
             try:
                 server.DATA = root / 'events.json'; server.TRIPS = root / 'trips.json'; server.UPLOADS = root / 'uploads'
-                existing = {'id': 'other-trip', 'title': 'גיאורגיה · באטומי', 'start': '2026-12-11', 'end': '2026-12-12', 'days': 2, 'documents': [], 'destinations': [{'city': 'Batumi', 'country': 'Georgia'}], 'hotels': [], 'flights': [], 'trains': [], 'attractions': [], 'rentals': [], 'restaurants': []}
+                existing = {
+                    'id': 'first-booking-trip', 'title': 'Custom title', 'title_custom': True,
+                    'start': '2026-12-10', 'end': '2026-12-12', 'days': 3,
+                    'hotels': [{'name': 'First booking', 'start': '2026-12-10', 'end': '2026-12-12'}],
+                    'flights': [], 'trains': [], 'attractions': [], 'rentals': [], 'restaurants': [],
+                    'documents': [], 'destinations': [{'country': 'Georgia'}],
+                }
+                server.save_trips([existing]); server.save_events([])
+                path = root / 'trip-com-flight.pdf'; path.write_bytes(b'%PDF fake')
+                result = server.create_trip_from_document('trip-com-flight.pdf', path, 'Email', ai_override={
+                    'type': 'flight', 'airline': 'Trip.com Airline', 'flight_number': 'TC101',
+                    'origin': 'Milan', 'destination': 'Paris',
+                    'departure_date': '2026-12-19', 'departure_time': '09:00',
+                    'arrival_date': '2026-12-19', 'arrival_time': '11:00',
+                })
+                saved = json.loads(server.TRIPS.read_text())
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(result['id'], 'first-booking-trip')
+                self.assertEqual((saved[0]['start'], saved[0]['end'], saved[0]['days']), ('2026-12-10', '2026-12-19', 10))
+                self.assertEqual(saved[0]['title'], 'Custom title')
+                self.assertEqual(len(saved[0]['flights']), 1)
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
+
+    def test_hotel_within_window_ignores_country_conflict_and_attaches(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                server.DATA = root / 'events.json'; server.TRIPS = root / 'trips.json'; server.UPLOADS = root / 'uploads'
+                existing = {'id': 'other-trip', 'title': 'My custom trip', 'title_custom': True, 'start': '2026-12-11', 'end': '2026-12-12', 'days': 2, 'documents': [], 'destinations': [{'city': 'Batumi', 'country': 'Georgia'}], 'hotels': [], 'flights': [], 'trains': [], 'attractions': [], 'rentals': [], 'restaurants': []}
                 server.save_trips([existing]); server.save_events([])
                 path = root / 'milan-hotel.txt'
                 path.write_text('NH Collection Milano. Check-in: December 10, 2026. Check-out: December 13, 2026.', encoding='utf-8')
                 result = server.create_trip_from_document('milan-hotel.txt', path, source='Email', ai_override={'type': 'hotel', 'status': 'confirmed', 'hotel': 'NH Collection Milano', 'city': 'Milan', 'country': 'Italy', 'check_in': '2026-12-10', 'check_out': '2026-12-13'})
-                self.assertNotEqual(result['id'], 'other-trip')
-                self.assertEqual(len(json.loads(server.TRIPS.read_text())), 2)
+                saved = json.loads(server.TRIPS.read_text())
+                self.assertEqual(result['id'], 'other-trip')
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(saved[0]['title'], 'My custom trip')
             finally:
                 server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
 

@@ -1543,47 +1543,64 @@ def decorate_trip_booking(trip, ai, filename, intake_id):
     return changed
 
 
-def dated_trip_target(trips, date_value):
-    date_value = str(date_value or "").strip()
-    if not date_value:
-        return None
-    return next((trip for trip in trips if str(trip.get("start") or "") <= date_value <= str(trip.get("end") or "")), None)
-
-
-def hotel_trip_target(trips, start, end, country=""):
-    """Match hotel date ranges to one overlapping trip, preferring compatible country evidence."""
+def dated_trip_target(trips, date_value, end_value=None, proximity_days=7):
+    """Find the uniquely closest open trip within the configured booking-date window."""
     try:
-        booking_start = datetime.fromisoformat(str(start)).date()
-        booking_end = datetime.fromisoformat(str(end)).date()
+        booking_start = datetime.fromisoformat(str(date_value or "").strip()).date()
+        booking_end = datetime.fromisoformat(str(end_value or date_value or "").strip()).date()
     except (TypeError, ValueError):
         return None
-    requested_country = re.sub(r"\s+", " ", str(country or "")).strip().casefold()
+    if booking_end < booking_start:
+        return None
+    proximity_days = max(0, int(proximity_days))
     candidates = []
     for trip in trips:
+        if not isinstance(trip, dict) or trip.get("closed") or trip.get("archived"):
+            continue
+        if str(trip.get("status") or "").strip().casefold() in {"closed", "completed", "archived"}:
+            continue
         try:
             trip_start = datetime.fromisoformat(str(trip.get("start") or "")).date()
             trip_end = datetime.fromisoformat(str(trip.get("end") or "")).date()
         except (TypeError, ValueError):
             continue
-        if booking_start > trip_end or booking_end < trip_start:
+        if trip_end < trip_start:
             continue
-        countries = {
-            re.sub(r"\s+", " ", str(value or "")).strip().casefold()
-            for value in ([d.get("country") for d in trip.get("destinations", []) if isinstance(d, dict)]
-                          + [h.get("country") for h in trip.get("hotels", []) if isinstance(h, dict)])
-            if str(value or "").strip()
-        }
-        if requested_country and countries and requested_country not in countries:
-            continue
-        candidates.append(trip)
-    if len(candidates) == 1:
-        return candidates[0]
-    start_containing = [trip for trip in candidates if str(trip.get("start") or "") <= booking_start.isoformat() <= str(trip.get("end") or "")]
-    if len(start_containing) == 1:
-        return start_containing[0]
-    if len(candidates) > 1:
-        raise ValueError("hotel dates overlap multiple trips; destination cannot be matched uniquely")
-    return None
+        if trip_end < booking_start:
+            distance = (booking_start - trip_end).days
+        elif trip_start > booking_end:
+            distance = (trip_start - booking_end).days
+        else:
+            distance = 0
+        if distance <= proximity_days:
+            candidates.append((distance, trip))
+    if not candidates:
+        return None
+    best_distance = min(distance for distance, _ in candidates)
+    closest = [trip for distance, trip in candidates if distance == best_distance]
+    if len(closest) != 1:
+        raise ValueError("booking dates match multiple trips within seven days")
+    return closest[0]
+
+
+def extend_trip_window(trip, start, end=None):
+    """Keep the matched trip calendar wide enough to include its new booking."""
+    try:
+        booking_start = datetime.fromisoformat(str(start or "").strip()).date()
+        booking_end = datetime.fromisoformat(str(end or start or "").strip()).date()
+    except (TypeError, ValueError):
+        return trip
+    trip_start = datetime.fromisoformat(str(trip.get("start") or "")).date() if trip.get("start") else booking_start
+    trip_end = datetime.fromisoformat(str(trip.get("end") or "")).date() if trip.get("end") else booking_end
+    merged_start, merged_end = min(trip_start, booking_start), max(trip_end, booking_end)
+    trip["start"], trip["end"] = merged_start.isoformat(), merged_end.isoformat()
+    trip["days"] = (merged_end - merged_start).days + 1
+    return trip
+
+
+def hotel_trip_target(trips, start, end, country=""):
+    """Use the shared seven-day date rule; destination labels do not block matching."""
+    return dated_trip_target(trips, start, end, proximity_days=7)
 
 
 CITY_DISPLAY_NAMES = {
@@ -2204,9 +2221,11 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         departure = min(record["departure_date"] for record in records)
         arrival = max(record["arrival_date"] for record in records)
         trips = load_trips()
-        target = dated_trip_target(trips, departure)
+        target = dated_trip_target(trips, departure, arrival)
         if not target:
             target = create_dated_trip_shell(trips, departure, arrival, source, filename, f"טיול · {records[0].get('destination')}")
+        else:
+            extend_trip_window(target, departure, arrival)
         target.setdefault("flights", []).extend(records)
         target["flights"] = list({json.dumps(f, sort_keys=True, ensure_ascii=False): f for f in target["flights"]}.values())
         target.setdefault("documents", []).append(filename)
@@ -2225,11 +2244,11 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         trips = load_trips()
         policy_start = normalize_date_value(str(ai.get("valid_from") or ai.get("check_in") or ai.get("departure_date") or "").strip()) or str(ai.get("valid_from") or ai.get("check_in") or ai.get("departure_date") or "").strip()
         policy_end = normalize_date_value(str(ai.get("valid_to") or ai.get("check_out") or ai.get("arrival_date") or "").strip()) or str(ai.get("valid_to") or ai.get("check_out") or ai.get("arrival_date") or "").strip()
-        target = dated_trip_target(trips, policy_start)
+        target = dated_trip_target(trips, policy_start, policy_end or policy_start)
         if not target and policy_start:
             target = create_dated_trip_shell(trips, policy_start, policy_end or policy_start, source, filename, "טיול חדש · ביטוח")
-        if not target and len(trips) == 1: target = trips[0]
         if not target: raise ValueError("insurance cannot be assigned to one dated trip")
+        extend_trip_window(target, policy_start, policy_end or policy_start)
         insurance = normalize_insurance(ai)
         insurance["document"] = filename
         insurance["source_language"] = insurance.get("source_language") or str(ai.get("source_language") or "").strip()
@@ -2241,8 +2260,9 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         date = str(ai.get("date") or "").strip(); time_value = str(ai.get("time") or "").strip(); name = str(ai.get("restaurant_name") or ai.get("name") or "").strip()
         location = str(ai.get("address") or ai.get("location") or "").strip(); phone = str(ai.get("phone") or "").strip()
         if not all((date, time_value, name)): raise ValueError("restaurant reservation missing name, date, or time")
-        trips = load_trips(); target = dated_trip_target(trips, date)
+        trips = load_trips(); target = dated_trip_target(trips, date, date)
         if not target: target = create_dated_trip_shell(trips, date, date, source, filename, f"טיול · {location or name}")
+        else: extend_trip_window(target, date, date)
         record = {"name": name, "date": date, "time": time_value, "address": location, "location": location, "phone": phone, "supplier": str(ai.get("supplier") or "").strip(), "confirmation_number": str(ai.get("confirmation_number") or "").strip(), "document": filename, "status": "confirmed"}
         target.setdefault("restaurants", []).append(record); target["restaurants"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["restaurants"]}.values()); preserve_booking_metadata(target, source, status=str(ai.get("status") or "confirmed").strip().lower()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"הזמנת מסעדה · {name}"; save_trips(trips)
         events = load_events(); event = [time_value, "🍽️", name, location or "הזמנת מסעדה", "מסעדה", source, date, location]
@@ -2254,8 +2274,9 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         pickup_date = normalize_date_value(pickup_date) or pickup_date
         dropoff_date = normalize_date_value(str(ai.get("dropoff_date") or "").strip()) or str(ai.get("dropoff_date") or "").strip()
         if not all((pickup_date, pickup_time, pickup_location, vehicle_type)): raise ValueError("car rental missing pickup location, time, date, or vehicle type")
-        trips = load_trips(); target = dated_trip_target(trips, pickup_date)
+        trips = load_trips(); target = dated_trip_target(trips, pickup_date, dropoff_date or pickup_date)
         if not target: target = create_dated_trip_shell(trips, pickup_date, dropoff_date or pickup_date, source, filename, f"טיול · {trip_title_from_location(pickup_location, 'טיול חדש')}")
+        else: extend_trip_window(target, pickup_date, dropoff_date or pickup_date)
         record = {"pickup_date":pickup_date,"pickup_time":pickup_time,"pickup_location":pickup_location,"vehicle_type":vehicle_type,"dropoff_date":dropoff_date,"dropoff_time":str(ai.get("dropoff_time") or "").strip(),"dropoff_location":str(ai.get("dropoff_location") or "").strip(),"document":filename}
         target.setdefault("rentals", []).append(record); target["rentals"] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target["rentals"]}.values()); preserve_booking_metadata(target, source, status=str(ai.get("status") or "confirmed").strip().lower()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = f"השכרת רכב · {vehicle_type}"; save_trips(trips)
         events = load_events(); title = f"איסוף רכב · {vehicle_type}"; details = f"{pickup_location} · שעה {pickup_time}"; event = [pickup_time, "🚗", title, details, "רכב", source, pickup_date, pickup_location]
@@ -2277,8 +2298,9 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
             facts = extract_attraction_facts(text, ai); date = facts["date"]; time_value = facts["time"]; name = facts["name"]; location = facts["location"]
             if not all((date, time_value, name, location)): raise ValueError("attraction document missing unambiguous facts")
             title = name; details = location; record = {"name":name,"location":location,"date":date,"time":time_value,"document":filename}; kind = "אטרקציה"; icon = "🎟️"
-        trips = load_trips(); target = dated_trip_target(trips, date)
+        trips = load_trips(); target = dated_trip_target(trips, date, date)
         if not target: target = create_dated_trip_shell(trips, date, date, source, filename, f"טיול · {name}")
+        else: extend_trip_window(target, date, date)
         key = "trains" if doc_type == "train" else "attractions"; target.setdefault(key, []).append(record); target[key] = list({json.dumps(x, sort_keys=True, ensure_ascii=False): x for x in target[key]}.values()); preserve_booking_metadata(target, source, status=str(ai.get("status") or "confirmed").strip().lower()); target.setdefault("documents", []).append(filename); target["documents"] = list(dict.fromkeys(target["documents"])); target.setdefault("document_titles", {})[filename] = ((f"כרטיס רכבת · {name}") if doc_type == "train" else f"אטרקציה · {name}"); save_trips(trips)
         events = load_events(); event = [time_value, icon, title, details, kind, source, date, record.get("location", "")]
         if not any(len(e) > 6 and e[2] == title and e[6] == date for e in events): events.insert(0, event); save_events(events)
@@ -2352,7 +2374,8 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         unique = {(d.get("city"), d.get("country")): d for d in destinations}
         match["destinations"] = list(unique.values())
         countries = list(dict.fromkeys(d["country"] for d in match["destinations"]))
-        match["title"] = " · ".join(countries)
+        if not match.get("title_custom"):
+            match["title"] = " · ".join(countries)
         match["start"], match["end"] = merged_start.isoformat(), merged_end.isoformat()
         match["days"] = (merged_end - merged_start).days + 1
         match["images"] = list(dict.fromkeys(match.get("images", [match.get("image")] if match.get("image") else []) + [image]))
