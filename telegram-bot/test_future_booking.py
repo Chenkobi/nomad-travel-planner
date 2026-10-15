@@ -57,6 +57,26 @@ class FutureBookingTests(unittest.TestCase):
             finally:
                 server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
 
+    def test_one_way_flight_can_omit_arrival_time(self):
+        ai = {
+            'type': 'flight', 'airline': 'Arkia', 'flight_number': 'IZ414',
+            'origin': 'Batumi', 'destination': 'Tel Aviv',
+            'departure_date': '2026-10-26', 'departure_time': '14:15',
+        }
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                server.DATA = root / 'events.json'; server.TRIPS = root / 'trips.json'; server.UPLOADS = root / 'uploads'
+                server.save_trips([]); server.save_events([])
+                source = root / 'arkia.html'; source.write_text('<html>Arkia one-way ticket</html>', encoding='utf-8')
+                trip = server.create_trip_from_document('arkia.html', source, 'Email', ai_override=ai, mime_type='text/html')
+                self.assertEqual(trip['_ingested_type'], 'flight')
+                self.assertEqual(trip['flights'][0]['departure_time'], '14:15')
+                self.assertEqual(trip['flights'][0]['arrival_time'], '')
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
+
     def test_car_rental_month_name_dates_are_normalized_before_routing(self):
         with TemporaryDirectory() as tmp:
             old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS

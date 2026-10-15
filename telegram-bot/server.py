@@ -1813,7 +1813,7 @@ def extract_pdf_text(path):
     text = ""
     image_suffixes = {".jpg", ".jpeg", ".png", ".webp"}
     if path.suffix.lower() in {".html", ".htm"}:
-        try: return html_to_text(path.read_text(encoding="utf-8", errors="replace"))
+        try: return html_to_text(decode_html_bytes(path.read_bytes()))
         except OSError: return ""
     if path.suffix.lower() in {".txt", ".text"}:
         try: return path.read_text(encoding="utf-8", errors="replace")
@@ -1973,10 +1973,11 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         for segment in flight_segments:
             departure = str(segment.get("departure_date") or "").strip()
             arrival = str(segment.get("arrival_date") or departure).strip()
-            required = [str(segment.get(k) or "").strip() for k in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_time")]
-            if not departure or not arrival or not all(required) or not valid_date(departure) or not valid_date(arrival) or not valid_time(str(segment.get("departure_time"))) or not valid_time(str(segment.get("arrival_time"))):
+            required = [str(segment.get(k) or "").strip() for k in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time")]
+            arrival_time = str(segment.get("arrival_time") or "").strip()
+            if not departure or not arrival or not all(required) or not valid_date(departure) or not valid_date(arrival) or not valid_time(str(segment.get("departure_time"))) or (arrival_time and not valid_time(arrival_time)):
                 raise ValueError("flight document missing unambiguous flight facts")
-            records.append({"airline":segment.get("airline"),"number":_normalize_flight_number(segment.get("flight_number")),"origin":segment.get("origin"),"destination":segment.get("destination"),"departure_date":departure,"departure_time":segment.get("departure_time"),"arrival_date":arrival,"arrival_time":segment.get("arrival_time"),"document":filename})
+            records.append({"airline":segment.get("airline"),"number":_normalize_flight_number(segment.get("flight_number")),"origin":segment.get("origin"),"destination":segment.get("destination"),"departure_date":departure,"departure_time":segment.get("departure_time"),"arrival_date":arrival,"arrival_time":str(segment.get("arrival_time") or ""),"document":filename})
         departure = min(record["departure_date"] for record in records)
         arrival = max(record["arrival_date"] for record in records)
         trips = load_trips()
