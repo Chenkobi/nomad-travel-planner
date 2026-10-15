@@ -2,6 +2,12 @@ name: Deploy to UGREEN
 
 on:
   workflow_dispatch:
+    inputs:
+      clear_intake:
+        description: "Permanently delete all intake email data"
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -99,3 +105,11 @@ jobs:
 
           curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8787/healthz
           printf '\nDeployment verified: %s\n' "$RELEASE_TAG"
+
+      - name: Permanently clear intake mailbox (explicit dispatch only)
+        if: github.event_name == 'workflow_dispatch' && inputs.clear_intake == true
+        run: |
+          set -Eeuo pipefail
+          result="$(docker exec "$CONTAINER_NAME" python3 -c 'import sys; sys.path.insert(0, "/app/telegram-bot"); import server; removed = server.clear_email_intake_permanently(); print({"deleted": removed, "intake_empty": not server.load_email_index(), "trips": len(server.load_trips())})')"
+          printf '%s\n' "$result"
+          [[ "$result" == *"'intake_empty': True"* ]]
