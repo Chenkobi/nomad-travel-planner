@@ -101,6 +101,10 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertIn("data.trips.length===0&&localSnapshot.length", INDEX)
         self.assertIn("/api/trips',{method:'POST'", INDEX)
 
+    def test_new_processed_notification_refreshes_visible_trip_data(self):
+        self.assertIn("await syncRemoteTrips();await syncRemoteEvents()", INDEX)
+        self.assertIn("setInterval(syncNotifications,30000)", INDEX)
+
     def test_server_trip_creation_endpoint_is_present(self):
         server = (ROOT / "telegram-bot" / "server.py").read_text(encoding="utf-8")
         self.assertIn('if self.path == "/api/trips":', server)
