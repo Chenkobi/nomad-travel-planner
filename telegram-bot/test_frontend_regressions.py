@@ -47,6 +47,8 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertNotIn('<h2>פרטי היום</h2>', INDEX)
         self.assertNotIn('id="countryDetails"', INDEX)
         self.assertNotIn('id="hotelDetails"', INDEX)
+        self.assertNotIn("#countryDetails", INDEX)
+        self.assertNotIn("#hotelDetails", INDEX)
 
     def test_trip_centered_navigation_has_tools_sheet_and_current_day_logic(self):
         self.assertIn('id="openTripTools"', INDEX)
