@@ -1,0 +1,4 @@
+From: supplier@example.test
+Subject: Booking confirmed
+
+<html><body><p>Your booking is confirmed.</p><div>HoteI: Orchard House</div><div>City: Rome</div><div>Check-in: 2027-08-02</div><div>Check-out: 2027-08-05</div><div>Check-in time: 09.05 AM</div></body></html>

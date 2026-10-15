@@ -22,6 +22,31 @@ class ProviderAgnosticExtractionTests(unittest.TestCase):
         self.assertEqual(result["facts"]["check_in"], "2027-04-12")
         self.assertEqual(result["facts"]["check_out"], "2027-04-15")
 
+    def test_free_form_direct_hotel_email_extracts_narrative_facts(self):
+        result = self._extract("direct-hotel-freeform.eml")
+        self.assertEqual(result["type"], "hotel")
+        self.assertEqual(result["facts"]["hotel"], "Cedar Lane Inn")
+        self.assertEqual(result["facts"]["city"], "Porto")
+        self.assertEqual(result["facts"]["check_in"], "2027-09-07")
+        self.assertEqual(result["facts"]["check_out"], "2027-09-10")
+        self.assertEqual(result["facts"]["check_in_time"], "15:30")
+
+    def test_hebrew_hotel_labels_are_supported_without_translating_values(self):
+        result = self._extract("hebrew-hotel.eml")
+        self.assertEqual(result["type"], "hotel")
+        self.assertEqual(result["facts"]["hotel"], "מלון שקיעה")
+        self.assertEqual(result["facts"]["city"], "אילת")
+        self.assertEqual(result["facts"]["check_in"], "2027-04-12")
+        self.assertEqual(result["facts"]["check_out"], "2027-04-15")
+
+    def test_html_and_ocr_noise_are_normalized(self):
+        result = self._extract("html-ocr-hotel.eml")
+        self.assertEqual(result["type"], "hotel")
+        self.assertEqual(result["facts"]["hotel"], "Orchard House")
+        self.assertEqual(result["facts"]["check_in"], "2027-08-02")
+        self.assertEqual(result["facts"]["check_out"], "2027-08-05")
+        self.assertEqual(result["facts"]["check_in_time"], "09:05")
+
     def test_ota_hotel_email_uses_facts_not_marketplace_identity(self):
         result = self._extract("ota-hotel.eml")
         self.assertEqual(result["type"], "hotel")
