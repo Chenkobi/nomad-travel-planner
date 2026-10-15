@@ -77,6 +77,11 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertIn("/api/intake/review", INDEX)
         self.assertIn("מרכז אישורים", INDEX)
 
+    def test_email_source_preview_is_structured_and_not_raw_only(self):
+        self.assertIn("function renderEmailSource(text,filename)", INDEX)
+        self.assertIn("email-source-meta", INDEX)
+        self.assertIn("פתיחת המקור הגולמי", INDEX)
+
     def test_booking_events_use_schedule_overrides_not_source_deletion(self):
         self.assertIn("schedule_checkin_time", INDEX)
         self.assertIn("schedule_checkin_hidden", INDEX)
