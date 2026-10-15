@@ -1813,15 +1813,17 @@ def resume_pending_email_processing():
             and str(record.get("provider") or "").casefold() in {"wizz_air", "sixt"}
             and str(record.get("intent") or "").casefold() in {"modified", "cancelled"}
         )
-        booking_restaurant_recovery = (
+        restaurant_recovery = (
             status == "needs_review"
-            and str(record.get("provider") or "").casefold() == "booking.com"
             and reason == "ValueError: restaurant reservation missing name, date, or time"
+            and not record.get("restaurant_recovery_attempted")
         )
-        retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors) or recent_lifecycle_retry or booking_restaurant_recovery
+        retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors) or recent_lifecycle_retry or restaurant_recovery
         if retryable:
             if recent_lifecycle_retry:
                 update_email_record(intake_id=record.get("id"), lifecycle_recovery_attempted=True)
+            if restaurant_recovery:
+                update_email_record(intake_id=record.get("id"), restaurant_recovery_attempted=True)
             if status == "needs_review":
                 update_email_record(intake_id=record.get("id"), status="received", previous_review_reason=reason, processing_error="")
             threading.Thread(target=process_incoming_email, args=(record,), daemon=True).start()
