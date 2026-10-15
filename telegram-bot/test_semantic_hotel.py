@@ -11,6 +11,13 @@ class SemanticHotelTests(unittest.TestCase):
  def test_html_hebrew(self):
   r=understand_hotel_reservation("אישור הזמנה","<div>מלון: מלון שקיעה</div><div>עיר: אילת</div><div>צ׳ק-אין: 12 באפריל 2027</div><div>צ׳ק-אאוט: 15 באפריל 2027</div>")
   self.assertEqual(r["decision"],"accept"); self.assertEqual(r["facts"]["check_in"]["value"],"2027-04-12")
+ def test_free_form_direct_hotel_confirmation_is_understood_without_labels(self):
+  r=understand_hotel_reservation("Minor Hotels reservation confirmation", "Your reservation at Anantara Riverside Bangkok Resort is confirmed. You will arrive on 5 May 2027 and depart on 8 May 2027.")
+  self.assertEqual(r["intent"], "reservation")
+  self.assertEqual(r["decision"], "accept")
+  self.assertEqual(r["facts"]["check_in"]["value"], "2027-05-05")
+  self.assertEqual(r["facts"]["check_out"]["value"], "2027-05-08")
+
  def test_recommendation_policy_rejected(self):
   self.assertEqual(understand_hotel_reservation("Recommended hotels","Explore recommended hotels. No booking has been made.")["decision"],"reject")
   self.assertEqual(understand_hotel_reservation("Hotel cancellation policy","Bookings may be cancelled before arrival.")["intent"],"policy")

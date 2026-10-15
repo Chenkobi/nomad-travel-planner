@@ -36,14 +36,23 @@ def _find(field,lines):
         if m:return m.group(1).strip(),line
     return None,None
 
-def _fact(value=None,evidence=None,confidence=0):return {"value":value,"evidence":evidence,"confidence":round(confidence,2)}
+def _fact(value=None,evidence=None,confidence=0.0):return {"value":value,"evidence":evidence,"confidence":round(confidence,2)}
 
 def understand_hotel_reservation(subject="",body=""):
     subject=re.sub(r"\s+"," ",str(subject or "")).strip(); lines=[x for x in _plain(str(body or "")).splitlines() if x]; combined=(subject+"\n"+"\n".join(lines)).casefold()
     strong=bool(re.search(r"\b(?:reservation|booking|confirmation|confirmed|itinerary|voucher)\b|הזמנה|אישור",combined)); rec=bool(re.search(r"\b(?:recommended|recommendations?|discover|explore|inspiration|guide|suggested)\b|המלצות",combined)); policy=bool(re.search(r"\b(?:policy|policies|terms and conditions|cancellation policy|privacy policy)\b|מדיניות|תנאים",combined)); no=bool(re.search(r"\b(?:no booking|not been booked|not a reservation)\b|לא בוצעה הזמנה",combined))
     facts={}; raw,line=_find("hotel",lines); facts["hotel"]=_fact(raw or None,line,.98 if raw else 0); raw,line=_find("city",lines); facts["city"]=_fact(raw or None,line,.95 if raw else 0)
+    if not facts["hotel"]["value"]:
+        match=re.search(r"\b(?:reservation|booking)\s+at\s+(.+?)(?=\s+is\s+(?:confirmed|booked)|[,.]\s|$)", subject+"\n"+"\n".join(lines), re.I)
+        if match:
+            facts["hotel"]=_fact(match.group(1).strip(), match.group(0), .93)
     for f in ("check_in","check_out"):
-        raw,line=_find(f,lines); val,conf=_date(raw); facts[f]=_fact(val,line,conf)
+        raw,line=_find(f,lines)
+        if not raw:
+            words=("arrive|arrival|check[- ]?in") if f=="check_in" else ("depart|departure|check[- ]?out")
+            match=re.search(rf"\b(?:{words})\s+(?:on\s+)?((?:[A-Za-zÀ-ת]+\s+\d{{1,2}}\s+20\d{{2}})|(?:\d{{1,2}}\s+[A-Za-zÀ-ת]+\s+20\d{{2}}))", subject+"\n"+"\n".join(lines), re.I)
+            if match: raw,line=match.group(1),match.group(0)
+        val,conf=_date(raw); facts[f]=_fact(val,line,conf)
     intent="recommendation" if no or (rec and not strong) else "policy" if policy and not strong else "reservation" if strong else "ambiguous"
     required=(facts["hotel"],facts["check_in"],facts["check_out"]); decision="accept" if intent=="reservation" and all(x["value"] and x["confidence"]>=.9 for x in required) else "review" if intent=="reservation" else "reject"
     return {"intent":intent,"decision":decision,"facts":facts}
