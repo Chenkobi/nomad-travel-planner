@@ -2141,9 +2141,14 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         dates = [(y1, months[m1[:3].upper()], d1.zfill(2)), (y2, months[m2[:3].upper()], d2.zfill(2))]
     elif label_dates: dates = [(y, months[m[:3].upper()], d.zfill(2)) for m, d, y in label_dates]
     ai_dates = [normalize_date_value(str(ai.get("check_in") or "").strip()), normalize_date_value(str(ai.get("check_out") or "").strip())]
-    if all(ai_dates): dates = [(value[:4], value[5:7], value[8:10]) for value in ai_dates]
+    ambiguous_numeric_dates = re.findall(r"\b(\d{1,2})/(\d{1,2})/(20\d{2})\b", text)
+    if any(int(first) <= 12 and int(second) <= 12 for first, second, _ in ambiguous_numeric_dates) and not all(ai_dates):
+        dates = []
+    elif all(ai_dates): dates = [(value[:4], value[5:7], value[8:10]) for value in ai_dates]
     start = "-".join(dates[0]) if dates else ""
     end = "-".join(dates[-1]) if len(dates) > 1 else start
+    if not start or not end:
+        raise ValueError("hotel document missing unambiguous lodging facts")
     start, end = validate_date_range(start, end)
     display_cities = list(dict.fromkeys((city_labels.get(x[0]) or x[0]) for x in cities))
     title = (" · ".join(dict.fromkeys(x[1] for x in cities))) or Path(filename).stem or "טיול חדש"

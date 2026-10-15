@@ -144,6 +144,74 @@ class ReleaseGateMatrixTests(unittest.TestCase):
         self.assertIn(record["id"], visible)
         self.assertEqual(visible[record["id"]]["status"], "processed")
 
+    def test_unknown_direct_hotel_with_multilingual_free_form_facts_is_processed(self):
+        record = self._process(
+            "reservas@cedarlane.example", "אישור שהייה במלון",
+            "הזמנה מאושרת עבור מלון Cedar Lane Inn בפורטו.",
+            self._hotel_ai(hotel="Cedar Lane Inn", city="Porto", country="Portugal"),
+        )
+        self.assertEqual(record["provider"], "unknown")
+        self.assertEqual(record["status"], "processed")
+        hotel = server.load_trips()[0]["hotels"][0]
+        self.assertEqual(hotel["name"], "Cedar Lane Inn")
+        self.assertEqual(hotel["city"], "Porto")
+
+    def test_html_only_email_preserves_rendered_facts_through_intake(self):
+        message = EmailMessage()
+        message["From"] = "bookings@unlisted.example"
+        message["Subject"] = "Booking confirmed"
+        message.add_alternative(
+            "<html><body><h1>Booking confirmed</h1><p>Hotel: Orchard House</p>"
+            "<p>Check-in: 2027-08-02</p><p>Check-out: 2027-08-05</p></body></html>",
+            subtype="html",
+        )
+        record, duplicate = server.store_incoming_email(message.as_bytes())
+        self.assertFalse(duplicate)
+        self.assertIn("Orchard House", server.email_body_text(record))
+        with patch.object(server, "gemini_extract", return_value=self._hotel_ai(
+            hotel="Orchard House", check_in="2027-08-02", check_out="2027-08-05",
+        )), patch.object(server, "send"), patch.object(server, "send_push_notification"):
+            server.process_incoming_email(record)
+        stored = server.load_email_index()[0]
+        self.assertEqual(stored["status"], "processed")
+        self.assertEqual(server.load_trips()[0]["hotels"][0]["name"], "Orchard House")
+
+    def test_ambiguous_hotel_dates_are_reviewed_without_inventing_dates(self):
+        record = self._process(
+            "bookings@unlisted.example", "Hotel booking confirmation",
+            "Hotel booking confirmation. Stay dates: 04/05/2027 to 07/05/2027.",
+            self._hotel_ai(check_in="", check_out=""),
+        )
+        self.assertEqual(record["status"], "needs_review")
+        self.assertEqual(record["review_reason"], "ValueError: hotel document missing unambiguous lodging facts")
+        self.assertFalse(server.load_trips())
+
+    def test_duplicate_confirmation_is_processed_once_and_not_repeated_in_trip(self):
+        first = self._process(
+            "bookings@unlisted.example", "Hotel booking confirmation", "Hotel reservation",
+            self._hotel_ai(confirmation_number="DUP-123"),
+        )
+        duplicate_message = EmailMessage()
+        duplicate_message["From"] = "bookings@unlisted.example"
+        duplicate_message["Subject"] = "Hotel booking confirmation"
+        duplicate_message.set_content("Hotel reservation")
+        second, duplicate = server.store_incoming_email(duplicate_message.as_bytes())
+        self.assertTrue(duplicate)
+        self.assertEqual(second["id"], first["id"])
+        self.assertEqual(first["status"], "processed")
+        hotels = [hotel for trip in server.load_trips() for hotel in trip.get("hotels", [])]
+        self.assertEqual(len(hotels), 1)
+        self.assertEqual(hotels[0]["confirmation_number"], "DUP-123")
+
+    def test_cancellation_without_unique_match_is_reviewed_and_keeps_trip_unchanged(self):
+        record = self._process(
+            "bookings@unlisted.example", "Reservation cancelled", "Your reservation was cancelled",
+            self._hotel_ai(status="cancelled", confirmation_number="NOT-FOUND"),
+        )
+        self.assertEqual(record["status"], "needs_review")
+        self.assertEqual(record["review_reason"], "no_unique_match")
+        self.assertFalse(server.load_trips())
+
 
 if __name__ == "__main__":
     unittest.main()
