@@ -43,6 +43,7 @@ from booking_lifecycle import (
 )
 from booking_types import infer_extended_type, normalize_insurance
 from booking_extraction import extract_booking_facts
+from booking_facts import merge_normalized_booking_facts, normalize_booking_facts
 from event_contract import event_as_legacy_list, event_identity
 from email_rules import _strong_confirmation_subject, classify_email_intent, looks_like_travel_email
 from provider_rules import enrich_ai_with_provider, identify_email_provider
@@ -1666,6 +1667,14 @@ def process_incoming_email(record):
         if ai:
             ai = enrich_ai_with_provider(ai, provider_info)
             ai = guard_marketplace_category(ai, provider_info, "\n".join((body, attachment_context_for_provider)))
+            # Keep extraction evidence behind one stable seam before validation/storage.
+            booking_contract = normalize_booking_facts(
+                ai,
+                subject=subject,
+                body="\n".join((body, attachment_context_for_provider)),
+                provider=provider_info,
+            )
+            ai = merge_normalized_booking_facts(ai, booking_contract)
         if not ai:
             final_record_status = "needs_review"
             validation_error_code = "provider_unavailable"
