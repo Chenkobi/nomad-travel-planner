@@ -44,6 +44,7 @@ from booking_lifecycle import (
 from booking_types import infer_extended_type, normalize_insurance
 from booking_extraction import extract_booking_facts
 from booking_facts import merge_normalized_booking_facts, normalize_booking_facts
+from semantic_hotel import understand_hotel_reservation
 from event_contract import event_as_legacy_list, event_identity
 from email_rules import _strong_confirmation_subject, classify_email_intent, looks_like_travel_email
 from provider_rules import enrich_ai_with_provider, identify_email_provider
@@ -1978,6 +1979,11 @@ def infer_document_type(ai, text="", context=""):
     normalized = str(text or "").lower()
     context_normalized = str(context or "").lower()
     combined = "\n".join(value for value in (normalized, context_normalized) if value)
+    semantic_hotel = understand_hotel_reservation(body=combined)
+    if (semantic_hotel["intent"] == "reservation"
+            and semantic_hotel["decision"] in {"accept", "review"}
+            and semantic_hotel["facts"]["hotel"]["value"]):
+        return "hotel"
     shared = extract_booking_facts(body=combined)
     if doc_type in ("", "other") and shared["type"] != "other":
         return shared["type"]
