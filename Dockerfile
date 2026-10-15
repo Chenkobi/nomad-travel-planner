@@ -13,6 +13,7 @@ COPY telegram-bot/booking_lifecycle.py /app/telegram-bot/booking_lifecycle.py
 COPY telegram-bot/booking_types.py /app/telegram-bot/booking_types.py
 COPY telegram-bot/booking_extraction.py /app/telegram-bot/booking_extraction.py
 COPY telegram-bot/booking_facts.py /app/telegram-bot/booking_facts.py
+COPY telegram-bot/semantic_hotel.py /app/telegram-bot/semantic_hotel.py
 COPY telegram-bot/event_contract.py /app/telegram-bot/event_contract.py
 RUN mkdir -p /app/trip-uploads
 ENV PORT=8787
