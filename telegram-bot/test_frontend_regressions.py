@@ -90,6 +90,38 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertIn("if(today>last)return 0", INDEX)
         self.assertIn("if(today===last)return days.length-1", INDEX)
 
+    def test_travel_mode_is_a_direct_entry_and_shows_the_next_trip_event(self):
+        self.assertIn('id="openTravelMode"', INDEX)
+        self.assertIn('id="travelModeModal"', INDEX)
+        self.assertIn('id="travelModeNextEvent"', INDEX)
+        self.assertIn('id="travelModeEventDate"', INDEX)
+        self.assertIn("formatDisplayDate(next.date)", INDEX)
+        self.assertIn('id="travelModeLocation"', INDEX)
+        self.assertIn('id="travelModeBooking"', INDEX)
+        self.assertIn('id="travelModeNavigate"', INDEX)
+        self.assertIn("function renderTravelMode()", INDEX)
+        self.assertIn("function openTravelMode()", INDEX)
+
+    def test_travel_mode_keeps_waze_and_offers_walking_maps(self):
+        self.assertIn('data-travel-nav="google"', INDEX)
+        self.assertIn('data-travel-nav="apple"', INDEX)
+        self.assertIn('data-travel-nav="waze"', INDEX)
+        self.assertIn("travelmode=walking", INDEX)
+        self.assertIn("https://maps.apple.com/directions?destination=", INDEX)
+        self.assertIn("mode=walking", INDEX)
+        self.assertIn("https://waze.com/ul", INDEX)
+        self.assertIn("🧭 ניווט ב-Waze", INDEX)
+
+    def test_rain_effect_uses_soft_translucent_droplets_not_streaks(self):
+        self.assertNotIn("animation:tripyRain 1.35s", INDEX)
+        self.assertNotIn("@keyframes tripyRain{", INDEX)
+        self.assertNotIn("repeating-linear-gradient(112deg", INDEX)
+        self.assertIn("tripyRainDrops", INDEX)
+        self.assertIn("radial-gradient(ellipse", INDEX)
+        self.assertIn("@keyframes tripyRainDrops{0%,100%{opacity:.28", INDEX)
+        self.assertIn("50%{opacity:.4;transform:translateY(2px)}", INDEX)
+        self.assertIn("prefers-reduced-motion:reduce", INDEX)
+
     def test_currency_is_full_screen_and_direct_input(self):
         self.assertIn('class="panel hidden currency-screen"', INDEX)
         self.assertIn('id="closeCurrency"', INDEX)
@@ -142,6 +174,12 @@ class FrontendRegressionTests(unittest.TestCase):
         server = (ROOT / "telegram-bot" / "server.py").read_text(encoding="utf-8")
         self.assertIn('if self.path == "/api/trips":', server)
         self.assertIn('trip_title_required', server)
+
+    def test_deploy_workflow_reads_back_travel_mode_and_rain_markers(self):
+        workflow = (ROOT / ".github" / "workflows" / "deploy-ugreen.yml").read_text(encoding="utf-8")
+        self.assertIn("live_travel_mode_markers_verified", workflow)
+        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "tripyRainDrops"):
+            self.assertIn(marker, workflow)
 
 if __name__ == "__main__":
     unittest.main()
