@@ -1,0 +1,11 @@
+From: itinerary@airline.example.test
+Subject: E-ticket confirmation
+
+Your flight booking is confirmed.
+Airline: Example Air
+Flight number: AB1234
+Departure airport: AAA
+Arrival airport: BBB
+Departure date: 06 May 2027
+Departure time: 08:30
+Arrival time: 11:45

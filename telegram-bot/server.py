@@ -42,6 +42,7 @@ from booking_lifecycle import (
     replace_booking,
 )
 from booking_types import infer_extended_type, normalize_insurance
+from booking_extraction import extract_booking_facts
 from event_contract import event_as_legacy_list, event_identity
 from email_rules import _strong_confirmation_subject, classify_email_intent, looks_like_travel_email
 from provider_rules import enrich_ai_with_provider, identify_email_provider
@@ -1968,6 +1969,9 @@ def infer_document_type(ai, text="", context=""):
     normalized = str(text or "").lower()
     context_normalized = str(context or "").lower()
     combined = "\n".join(value for value in (normalized, context_normalized) if value)
+    shared = extract_booking_facts(body=combined)
+    if doc_type in ("", "other") and shared["type"] != "other":
+        return shared["type"]
     hotel_markers = ("hotel", "resort", "check-in", "check in", "check-out", "check out", "room", "accommodation", "voco", "ibis", "emerald")
     restaurant_markers = ("restaurant", "dinner", "lunch", "table reservation", "מסעדה", "הזמנת שולחן")
     hotel_score = sum(1 for marker in hotel_markers if marker in combined)

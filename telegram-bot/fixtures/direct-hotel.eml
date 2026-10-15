@@ -1,0 +1,9 @@
+From: reservations@harborview.example.test
+Subject: Reservation confirmed
+
+Your reservation is confirmed.
+Hotel: Harbor View Hotel
+City: Valencia
+Check-in: 12 April 2027
+Check-out: 15 April 2027
+Room type: Standard
