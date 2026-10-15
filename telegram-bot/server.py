@@ -3017,7 +3017,7 @@ class Handler(BaseHTTPRequestHandler):
             if API_AUTH_TOKEN and not _auth_enabled():
                 self.send_header("Set-Cookie", _session_header(_new_session()))
             self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
-        static = {"/tripy-icon.png": (ROOT / "tripy-icon.png", "image/png"), "/manifest.webmanifest": (ROOT / "manifest.webmanifest", "application/manifest+json"), "/service-worker.js": (ROOT / "service-worker.js", "application/javascript; charset=utf-8")}
+        static = {"/tripy-icon.png": (ROOT / "tripy-icon.png", "image/png"), "/manifest.webmanifest": (ROOT / "manifest.webmanifest", "application/manifest+json"), "/service-worker.js": (ROOT / "service-worker.js", "application/javascript; charset=utf-8"), "/assets/rain-window.jpg": (ROOT / "assets" / "rain-window.jpg", "image/jpeg")}
         if path in static:
             file_path, content_type = static[path]
             if file_path.exists():

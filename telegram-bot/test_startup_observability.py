@@ -30,6 +30,23 @@ class StartupObservabilityTests(unittest.TestCase):
             httpd.shutdown()
             httpd.server_close()
 
+    def test_rain_photo_is_served_from_static_assets(self):
+        httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = HTTPConnection("127.0.0.1", httpd.server_port, timeout=2)
+            connection.request("GET", "/assets/rain-window.jpg")
+            response = connection.getresponse()
+            payload = response.read()
+            connection.close()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.getheader("Content-Type"), "image/jpeg")
+            self.assertTrue(payload.startswith(b"\xff\xd8\xff"))
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_telegram_startup_retries_delete_webhook_with_a_bound(self):
         with patch.object(server, "TOKEN", "present"), \
              patch.object(server, "TELEGRAM_STARTUP_RETRIES", 3), \

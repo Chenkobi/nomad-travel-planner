@@ -41,7 +41,7 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertIn("data-open-document", INDEX)
 
     def test_share_is_icon_only_in_hero_not_metrics(self):
-        self.assertIn('class="hero-share"', INDEX)
+        self.assertIn('class="hero-share liquid-glass-control"', INDEX)
         self.assertIn('aria-label="שיתוף הטיול"', INDEX)
         self.assertNotIn('hero-meta"><button class="primary" id="shareTripPrimary"', INDEX)
 
@@ -102,6 +102,11 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertIn("function renderTravelMode()", INDEX)
         self.assertIn("function openTravelMode()", INDEX)
 
+    def test_travel_mode_upcoming_cards_render_an_icon_and_full_width_details(self):
+        travel_mode = INDEX.split("function renderTravelMode(){", 1)[1].split("function closeTravelMode()", 1)[0]
+        self.assertIn('class="event-icon">${esc(item.event[1]||\'📍\')}</div><div><strong>', travel_mode)
+        self.assertIn('${esc(item.event[2]||\'אירוע\')}</strong><p>${esc(formatDisplayDate(item.date))}', travel_mode)
+
     def test_travel_mode_keeps_waze_and_offers_walking_maps(self):
         self.assertIn('data-travel-nav="google"', INDEX)
         self.assertIn('data-travel-nav="apple"', INDEX)
@@ -112,15 +117,19 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertIn("https://waze.com/ul", INDEX)
         self.assertIn("🧭 ניווט ב-Waze", INDEX)
 
-    def test_rain_effect_uses_soft_translucent_droplets_not_streaks(self):
-        self.assertNotIn("animation:tripyRain 1.35s", INDEX)
-        self.assertNotIn("@keyframes tripyRain{", INDEX)
-        self.assertNotIn("repeating-linear-gradient(112deg", INDEX)
-        self.assertIn("tripyRainDrops", INDEX)
-        self.assertIn("radial-gradient(ellipse", INDEX)
-        self.assertIn("@keyframes tripyRainDrops{0%,100%{opacity:.28", INDEX)
-        self.assertIn("50%{opacity:.4;transform:translateY(2px)}", INDEX)
-        self.assertIn("prefers-reduced-motion:reduce", INDEX)
+    def test_rain_mode_uses_real_raindrop_photo_and_liquid_glass(self):
+        self.assertNotIn(".hero.weather-snow::beforecontent", INDEX)
+        self.assertIn('.hero.weather-snow::before{content:"";', INDEX)
+        self.assertTrue((ROOT / "assets" / "rain-window.jpg").is_file())
+        self.assertIn("COPY assets/rain-window.jpg /app/assets/rain-window.jpg", (ROOT / "Dockerfile").read_text(encoding="utf-8"))
+        self.assertIn("assets/rain-window.jpg", INDEX)
+        self.assertIn("url('assets/rain-window.jpg')", INDEX)
+        rain_css = INDEX.split("body .hero.weather-rain{", 1)[1].split("</style>", 1)[0]
+        self.assertNotIn("radial-gradient", rain_css)
+        for marker in (".hero.weather-rain .context-card", "backdrop-filter:blur(24px)", "if(rainGlass){hero.style.removeProperty('background')", "card.style.removeProperty('background')"):
+            self.assertIn(marker, INDEX, f"missing rainy Liquid Glass marker: {marker}")
+        for marker in ('class="rain-glass-overlay"', 'class="pill liquid-glass-control"', "rainGlassSlide", "tripyRainDrops"):
+            self.assertNotIn(marker, INDEX, f"unexpected synthetic rain marker: {marker}")
 
     def test_currency_is_full_screen_and_direct_input(self):
         self.assertIn('class="panel hidden currency-screen"', INDEX)
@@ -175,11 +184,12 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertIn('if self.path == "/api/trips":', server)
         self.assertIn('trip_title_required', server)
 
-    def test_deploy_workflow_reads_back_travel_mode_and_rain_markers(self):
+    def test_deploy_workflow_reads_back_travel_mode_and_liquid_glass_without_rain_overlay(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy-ugreen.yml").read_text(encoding="utf-8")
         self.assertIn("live_travel_mode_markers_verified", workflow)
-        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "tripyRainDrops"):
-            self.assertIn(marker, workflow)
+        self.assertIn("unexpected synthetic rain overlay", workflow)
+        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)"):
+            self.assertTrue(marker in workflow, f"deployment read-back is missing marker: {marker}")
 
 if __name__ == "__main__":
     unittest.main()
