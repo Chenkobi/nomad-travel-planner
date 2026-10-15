@@ -86,6 +86,16 @@ class AuditHarnessTests(unittest.TestCase):
             self.assertNotIn("Private Hotel", result.stdout)
             self.assertNotIn("private-record", result.stdout)
 
+    def test_latest_only_cli_emits_safe_summary_without_corpus_details(self):
+        result = subprocess.run(
+            [sys.executable, str(TOOL), "--synthetic", "--count", "5", "--latest-only"],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        )
+        summary = json.loads(result.stdout)
+        self.assertIn("status", summary)
+        self.assertNotIn("provider_counts", summary)
+        self.assertNotIn("SYNTHETIC-CONFIRMATION", result.stdout)
+
     def test_report_never_contains_fixture_identifiers_or_raw_fact_values(self):
         result = subprocess.run(
             [sys.executable, str(TOOL), "--synthetic", "--count", "60"],

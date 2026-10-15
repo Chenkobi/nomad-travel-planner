@@ -1907,6 +1907,46 @@ def repair_trip_titles_from_bookings():
 SEMANTIC_RECOVERY_VERSION = "semantic-hotel-v1"
 
 
+CANCELLATION_SUBJECT_RECOVERY_VERSION = "subject-cancellation-v1"
+
+
+def should_recover_cancellation_policy_false_positive(record, source):
+    """Retry only unmatched reviews whose stored cancellation conflicts with source intent."""
+    if not isinstance(record, dict) or record.get("status") != "needs_review":
+        return False
+    if str(record.get("intent") or "").casefold() != "cancelled":
+        return False
+    if record.get("subject_cancellation_recovery_version") == CANCELLATION_SUBJECT_RECOVERY_VERSION:
+        return False
+    telemetry = record.get("extraction_telemetry") or []
+    telemetry = telemetry[-1] if isinstance(telemetry, list) and telemetry else {}
+    if not isinstance(telemetry, dict):
+        telemetry = {}
+    error_code = telemetry.get("validation_error_code") or record.get("validation_error_code")
+    if str(error_code or "").casefold() != "no_unique_match":
+        return False
+    source_intent = classify_email_intent(str(record.get("subject") or ""), source)
+    return source_intent == "confirmed"
+
+
+def _booking_source_ids(trips):
+    ids = set()
+    for trip in trips or []:
+        if not isinstance(trip, dict):
+            continue
+        for group in ("hotels", "flights", "trains", "rentals", "restaurants", "attractions", "insurance"):
+            bookings = trip.get(group) or []
+            if isinstance(bookings, dict):
+                bookings = [bookings]
+            for booking in bookings:
+                if not isinstance(booking, dict):
+                    continue
+                source_id = str(booking.get("source_email_id") or "").strip()
+                if source_id:
+                    ids.add(source_id)
+    return ids
+
+
 def resume_pending_email_processing():
     repair_trip_titles_from_bookings()
     retryable_errors = {
@@ -1914,9 +1954,16 @@ def resume_pending_email_processing():
         "ValueError: car rental missing pickup location, time, date, or vehicle type",
         "ValueError: document type not recognized; send a clearer screenshot or PDF",
     }
+    source_booking_ids = _booking_source_ids(load_trips())
     for record in load_email_index():
         status = str(record.get("status") or "")
         reason = str(record.get("review_reason") or "")
+        intake_id = str(record.get("id") or "")
+        cancellation_policy_recovery = (
+            bool(intake_id)
+            and intake_id not in source_booking_ids
+            and should_recover_cancellation_policy_false_positive(record, email_body_text(record))
+        )
         if status == "processed":
             expected_type = {"sixt": "car_rental", "wizz_air": "flight"}.get(str(record.get("provider") or "").casefold())
             changes = {"review_reason": ""} if record.get("review_reason") else {}
@@ -1936,8 +1983,10 @@ def resume_pending_email_processing():
             and not record.get("restaurant_recovery_attempted")
         )
         semantic_recovery = status == "needs_review" and record.get("semantic_recovery_version") != SEMANTIC_RECOVERY_VERSION
-        retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors) or recent_lifecycle_retry or restaurant_recovery or semantic_recovery
+        retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors) or recent_lifecycle_retry or restaurant_recovery or semantic_recovery or cancellation_policy_recovery
         if retryable:
+            if cancellation_policy_recovery:
+                update_email_record(intake_id=record.get("id"), subject_cancellation_recovery_version=CANCELLATION_SUBJECT_RECOVERY_VERSION)
             if semantic_recovery:
                 update_email_record(intake_id=record.get("id"), semantic_recovery_version=SEMANTIC_RECOVERY_VERSION)
             if recent_lifecycle_retry:

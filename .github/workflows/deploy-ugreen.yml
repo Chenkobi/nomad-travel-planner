@@ -106,6 +106,9 @@ jobs:
           curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8787/healthz
           printf '\nDeployment verified: %s\n' "$RELEASE_TAG"
 
+      - name: Verify latest email state after recovery (aggregate only)
+        run: docker exec "$CONTAINER_NAME" python3 /app/tools/audit_intake_corpus.py /app/email --latest-only --wait-terminal 90
+
       - name: Permanently clear intake mailbox (explicit dispatch only)
         if: github.event_name == 'workflow_dispatch' && inputs.clear_intake == true
         run: |

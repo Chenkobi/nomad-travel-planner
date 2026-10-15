@@ -16,6 +16,7 @@ from email import policy
 from email.parser import BytesParser
 from pathlib import Path
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "telegram-bot"))
@@ -277,25 +278,35 @@ def main() -> int:
     parser.add_argument("--count", type=int, default=60)
     parser.add_argument("--release-gate", action="store_true",
                         help="emit only machine-readable gate results and fail on violations")
+    parser.add_argument("--latest-only", action="store_true", help="emit only the privacy-safe latest-record summary")
+    parser.add_argument("--wait-terminal", type=int, default=0, help="wait for the latest record to leave received/processing")
     args = parser.parse_args()
+    if args.release_gate and args.latest_only:
+        parser.error("--release-gate and --latest-only are mutually exclusive")
     index = args.intake_dir / "index.json"
-    if args.synthetic:
-        records, mode = _synthetic_records(max(1, args.count)), "synthetic"
-    elif not index.is_file():
-        print("live index is missing; pass --synthetic for local synthetic data", file=sys.stderr)
-        return 2
-    else:
-        try:
-            raw = json.loads(index.read_text(encoding="utf-8"))
-            records = raw if isinstance(raw, list) else raw.get("records", [])
-            if not isinstance(records, list):
-                raise ValueError("records must be a list")
-            mode = "live"
-        except (OSError, ValueError, AttributeError, TypeError):
-            print("live index is invalid; refusing to run a synthetic fallback", file=sys.stderr)
+    deadline = time.monotonic() + max(0, min(args.wait_terminal, 300))
+    while True:
+        if args.synthetic:
+            records, mode = _synthetic_records(max(1, args.count)), "synthetic"
+        elif not index.is_file():
+            print("live index is missing; pass --synthetic for local synthetic data", file=sys.stderr)
             return 2
-    report = build_report(records, mode, args.intake_dir)
-    output = report["release_gate"] if args.release_gate else report
+        else:
+            try:
+                raw = json.loads(index.read_text(encoding="utf-8"))
+                records = raw if isinstance(raw, list) else raw.get("records", [])
+                if not isinstance(records, list):
+                    raise ValueError("records must be a list")
+                mode = "live"
+            except (OSError, ValueError, AttributeError, TypeError):
+                print("live index is invalid; refusing to run a synthetic fallback", file=sys.stderr)
+                return 2
+        report = build_report(records, mode, args.intake_dir)
+        latest = report.get("latest_record_summary") or {}
+        if time.monotonic() >= deadline or latest.get("status") not in {"received", "processing"}:
+            break
+        time.sleep(1)
+    output = latest if args.latest_only else report["release_gate"] if args.release_gate else report
     print(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if not args.release_gate or output["passed"] else 1
 

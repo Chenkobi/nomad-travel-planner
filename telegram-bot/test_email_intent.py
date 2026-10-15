@@ -64,6 +64,42 @@ class EmailIntentTests(unittest.TestCase):
         self.assertEqual(trip["provider"], "trip.com")
         self.assertEqual(trip["confidence"], 0.99)
 
+    def test_recovery_retries_only_unmatched_body_policy_false_positive_once(self):
+        record = {
+            "status": "needs_review", "intent": "cancelled", "subject": "Reservation details",
+            "extraction_telemetry": [{"validation_error_code": "no_unique_match"}],
+        }
+        body = "Reservation confirmed; cancellation policy: free cancellation until arrival."
+        self.assertTrue(server.should_recover_cancellation_policy_false_positive(record, body))
+        record["subject_cancellation_recovery_version"] = server.CANCELLATION_SUBJECT_RECOVERY_VERSION
+        self.assertFalse(server.should_recover_cancellation_policy_false_positive(record, body))
+        record.pop("subject_cancellation_recovery_version")
+        record["subject"] = "Your reservation was cancelled"
+        self.assertFalse(server.should_recover_cancellation_policy_false_positive(record, body))
+
+    def test_source_email_ids_prevent_duplicate_recovery(self):
+        trips = [{"hotels": [{"source_email_id": "mail-1"}], "rentals": [{"source_email_id": "mail-2"}]}]
+        self.assertEqual(server._booking_source_ids(trips), {"mail-1", "mail-2"})
+
+    def test_startup_recovery_requeues_only_body_policy_false_positive_once(self):
+        from unittest import mock
+        record = {
+            "id": "local-mail", "status": "needs_review", "intent": "cancelled",
+            "subject": "Reservation details", "semantic_recovery_version": server.SEMANTIC_RECOVERY_VERSION,
+            "extraction_telemetry": [{"validation_error_code": "no_unique_match"}],
+        }
+        with mock.patch.object(server, "repair_trip_titles_from_bookings"), \
+             mock.patch.object(server, "load_trips", return_value=[]), \
+             mock.patch.object(server, "load_email_index", return_value=[record]), \
+             mock.patch.object(server, "email_body_text", return_value="Reservation confirmed; cancellation policy: free cancellation."), \
+             mock.patch.object(server, "update_email_record", side_effect=lambda intake_id, **changes: record.update(changes)), \
+             mock.patch.object(server.threading, "Thread") as thread:
+            server.resume_pending_email_processing()
+        self.assertEqual(record["status"], "received")
+        self.assertEqual(record["subject_cancellation_recovery_version"], server.CANCELLATION_SUBJECT_RECOVERY_VERSION)
+        thread.assert_called_once()
+        thread.return_value.start.assert_called_once_with()
+
     def test_decorate_booking_persists_detected_source_provider(self):
         trip = {"hotels": [{"document": "email-1.txt", "name": "Example Hotel"}]}
         changed = server.decorate_trip_booking(
