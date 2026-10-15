@@ -139,12 +139,14 @@ def identify_email_provider(sender: str = "", reply_to: str = "", subject: str =
         evidence: list[str] = []
         score = 0
         for domain in rule["domains"]:
-            if domain in sender_domains:
+            matching_sender_domain = next((value for value in sender_domains if value == domain or value.endswith("." + domain)), None)
+            matching_forwarded_domain = next((value for value in forwarded_domains if value == domain or value.endswith("." + domain)), None)
+            if matching_sender_domain:
                 score += 100
-                evidence.append(f"sender_domain:{domain}")
-            elif domain in forwarded_domains:
+                evidence.append(f"sender_domain:{matching_sender_domain}")
+            elif matching_forwarded_domain:
                 score += 60
-                evidence.append(f"forwarded_header_domain:{domain}")
+                evidence.append(f"forwarded_header_domain:{matching_forwarded_domain}")
         for marker in rule["markers"]:
             marker_text = marker.casefold()
             if marker_text in subject_text:

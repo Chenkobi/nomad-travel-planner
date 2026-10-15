@@ -375,6 +375,32 @@ class EmailIngestionTests(unittest.TestCase):
                 server.TRIPS = old_trips
                 server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index
 
+    def test_email_body_is_supplemental_context_when_pdf_is_primary_source(self):
+        message = EmailMessage()
+        message['From'] = 'confirmation@booking.com'
+        message['Subject'] = 'Reservation confirmation'
+        message.set_content('Booking.com reservation confirmation\\nProperty: Test Hotel\\nCheck-in: 2026-10-20\\nCheck-out: 2026-10-23')
+        message.add_attachment(b'%PDF-1.4 test', maintype='application', subtype='pdf', filename='confirmation.pdf')
+        with TemporaryDirectory() as tmp:
+            old_dir, old_index = self._configure_temp_email_dir(tmp)
+            old_trips, old_uploads = server.TRIPS, server.UPLOADS
+            try:
+                server.TRIPS = Path(tmp) / 'trips.json'
+                server.UPLOADS = Path(tmp) / 'uploads'
+                record, _ = server.store_incoming_email(message.as_bytes())
+                captured = {}
+                ai = {'type': 'hotel', 'status': 'confirmed', 'hotel': 'Test Hotel', 'city': 'Paris', 'country': 'France', 'check_in': '2026-10-20', 'check_out': '2026-10-23'}
+                def extract(path, mime_type=None, supplemental_text=''):
+                    captured['supplemental_text'] = supplemental_text
+                    return ai
+                with patch.object(server, 'gemini_extract', side_effect=extract), patch.object(server, 'send'):
+                    server.process_incoming_email(record)
+                self.assertIn('Property: Test Hotel', captured['supplemental_text'])
+                self.assertIn('Check-out: 2026-10-23', captured['supplemental_text'])
+            finally:
+                server.TRIPS, server.UPLOADS = old_trips, old_uploads
+                server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index
+
     def test_provider_type_contradiction_cannot_be_persisted_as_processed(self):
         self.assertFalse(server.ingested_type_matches_booking('flight', {'_ingested_type': 'hotel'}))
         self.assertTrue(server.ingested_type_matches_booking('hotel', {'_ingested_type': 'hotel'}))

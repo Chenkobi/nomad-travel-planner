@@ -41,7 +41,7 @@ class EmailIntentTests(unittest.TestCase):
         self.assertEqual(result["category_hint"], "hotel")
 
     def test_booking_hotel_template_is_classified_from_lodging_fields(self):
-        text = """Booking.com reservation confirmation\nProperty: Batumi Hotel\nCheck-in: Tue, 20 Oct 2026\nCheck-out: Thu, 22 Oct 2026\nRoom: Double room"""
+        text = """Booking.com reservation confirmation\nProperty Batumi Hotel\nCheck-in Tue, 20 Oct 2026\nCheck-out Thu, 22 Oct 2026\nRoom Double room"""
         self.assertEqual(infer_extended_type({}, text), "hotel")
 
     def test_booking_lodging_fields_override_false_restaurant_type(self):
@@ -55,6 +55,14 @@ class EmailIntentTests(unittest.TestCase):
         )
         self.assertIn("Property:", combined)
         self.assertIn("Restaurant recommendations", combined)
+
+    def test_marketplace_provider_domains_accept_subdomains(self):
+        booking = identify_email_provider(sender="confirmation@mail.booking.com", subject="Reservation confirmation")
+        trip = identify_email_provider(sender="noreply@mailer.trip.com", subject="Hotel booking confirmation")
+        self.assertEqual(booking["provider"], "booking.com")
+        self.assertEqual(booking["confidence"], 0.99)
+        self.assertEqual(trip["provider"], "trip.com")
+        self.assertEqual(trip["confidence"], 0.99)
 
     def test_provider_identity_detects_sixt_and_car_rental(self):
         result = identify_email_provider(

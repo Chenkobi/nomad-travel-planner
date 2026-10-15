@@ -114,7 +114,7 @@ def infer_extended_type(ai: dict[str, Any] | None, text: str = "") -> str | None
     # Booking.com uses short labelled fields rather than the longer phrases
     # above. Require two lodging labels so a generic "check-in" mention alone
     # cannot turn a non-hotel travel message into a hotel booking.
-    booking_lodging_labels = ("property:", "check-in:", "check-out:", "room:", "accommodation:")
+    booking_lodging_labels = ("property", "check-in", "check-out", "room", "accommodation")
     if sum(label in lowered for label in booking_lodging_labels) >= 2:
         return "hotel"
     if any(marker in lowered for marker in ATTRACTION_MARKERS):

@@ -1656,8 +1656,12 @@ def process_incoming_email(record):
             byte_size = 0
         extracted_text_length = len(extract_pdf_text(path) or "")
         update_email_stage(intake_id, "extracting")
-        attachment_context = email_attachment_text_context(record, exclude_path=path)
-        ai = gemini_extract(path, mime_type=mime_type, supplemental_text=attachment_context) or {}
+        attachment_context = email_attachment_text_context(record, exclude_path=next(
+            (candidate for candidate, item in email_attachment_candidates(record) if item.get("filename") == Path(filename).name),
+            path,
+        ))
+        supplemental_context = "\n".join(part for part in (body[:30000], attachment_context) if part)
+        ai = gemini_extract(path, mime_type=mime_type, supplemental_text=supplemental_context) or {}
         if ai:
             ai = enrich_ai_with_provider(ai, provider_info)
         if not ai:
@@ -1948,7 +1952,7 @@ def infer_document_type(ai, text="", context=""):
     restaurant_markers = ("restaurant", "dinner", "lunch", "table reservation", "מסעדה", "הזמנת שולחן")
     hotel_score = sum(1 for marker in hotel_markers if marker in combined)
     restaurant_score = sum(1 for marker in restaurant_markers if marker in combined)
-    booking_lodging_labels = ("property:", "check-in:", "check-out:", "room:", "accommodation:")
+    booking_lodging_labels = ("property", "check-in", "check-out", "room", "accommodation")
     lodging_label_count = sum(label in combined for label in booking_lodging_labels)
     restaurant_fact_markers = ("table reservation", "restaurant name", "dining reservation", "party size", "reservation time")
     if doc_type == "restaurant" and lodging_label_count >= 2 and not any(marker in combined for marker in restaurant_fact_markers):
