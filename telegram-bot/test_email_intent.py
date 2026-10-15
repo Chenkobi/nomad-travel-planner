@@ -185,11 +185,29 @@ class EmailIntentTests(unittest.TestCase):
         self.assertEqual(
             server.intent_from_ai(
                 {'type': 'hotel', 'status': 'cancelled'},
-                'Reservation update',
-                'Your reservation has been cancelled.',
+                'Your reservation has been cancelled',
+                'Your reservation details are below.',
             ),
             'cancelled',
         )
+
+    def test_body_cancellation_terms_do_not_mark_hotel_or_car_email_cancelled(self):
+        for category in ('hotel', 'car_rental'):
+            with self.subTest(category=category):
+                intent = server.intent_from_ai(
+                    {'type': category, 'status': 'cancelled'},
+                    'Your reservation details',
+                    'Cancellation policy: free cancellation until check-in. You may cancel online.',
+                )
+                self.assertNotEqual(intent, 'cancelled')
+                self.assertEqual(
+                    server.intent_from_ai(
+                        {'type': category, 'status': 'confirmed'},
+                        'Your reservation was cancelled',
+                        'Cancellation policy: free cancellation until pickup.',
+                    ),
+                    'cancelled',
+                )
 
     def test_ai_preserves_refunded_as_distinct_lifecycle_intent(self):
         self.assertEqual(
@@ -248,8 +266,8 @@ class EmailIntentTests(unittest.TestCase):
         self.assertEqual(
             server.intent_from_ai(
                 {'type': 'hotel', 'status': 'confirmed'},
-                'Reservation update',
-                'Your reservation has been cancelled by the provider.',
+                'Your reservation was cancelled',
+                'Cancellation policy: free cancellation until the check-in date.',
             ),
             'cancelled',
         )

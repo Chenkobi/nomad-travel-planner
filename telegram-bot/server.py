@@ -1449,7 +1449,11 @@ def intent_from_ai(ai, subject="", body=""):
         return "confirmed"
     if explicit_intent in {"cancelled", "modified"}:
         return explicit_intent
-    status_map = {"confirmed": "confirmed", "modified": "modified", "cancelled": "cancelled", "refunded": "refunded"}
+    # AI status may be inferred from cancellation-policy text in the body.
+    # Cancellations are actionable only when the subject itself says so.
+    if status == "cancelled":
+        return explicit_intent if explicit_intent in {"confirmed", "modified"} else "unknown"
+    status_map = {"confirmed": "confirmed", "modified": "modified", "refunded": "refunded"}
     if status in status_map:
         return status_map[status]
 

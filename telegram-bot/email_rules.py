@@ -45,6 +45,8 @@ def _strong_cancellation_event(text):
         r"|\b(?:reservation|booking|confirmation|itinerary|flight|hotel|trip|rental)\b.{0,30}\b(?:cancelled|canceled|voided)\b"
         r"|\b(?:we|the airline|the hotel|the provider)\s+(?:have|has)\s+cancelled\b"
         r"|\bcancellation\s+confirmed\b"
+        r"|\b(?:booking|reservation|hotel|rental|trip|flight|itinerary)\s+cancellation\b"
+        r"|\bcancellation\s+(?:of\s+)?(?:your\s+)?(?:booking|reservation|hotel|rental|trip|flight|itinerary)\b"
         r"|\b(?:refund issued|refund processed|refunded in full)\b",
         text,
     ))
@@ -73,7 +75,7 @@ def classify_email_intent(subject, body):
     # This prevents policy/footer terms in the body from changing a new booking.
     if _strong_confirmation_subject(subject_text):
         return "confirmed"
-    if _strong_cancellation_event(text):
+    if _strong_cancellation_event(subject_text):
         return "cancelled"
     if _strong_modification_event(text):
         return "modified"
