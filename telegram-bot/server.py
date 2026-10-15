@@ -1784,6 +1784,7 @@ def resume_pending_email_processing():
     retryable_errors = {
         "ValueError: flight document missing unambiguous flight facts",
         "ValueError: car rental missing pickup location, time, date, or vehicle type",
+        "ValueError: document type not recognized; send a clearer screenshot or PDF",
     }
     for record in load_email_index():
         status = str(record.get("status") or "")
