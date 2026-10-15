@@ -77,6 +77,10 @@ jobs:
               "$1"
           }
 
+          verify_live_frontend() {
+            curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8787/ | python3 -c 'import sys; html=sys.stdin.read(); markers=("openTravelMode","toolsTravelMode","travelModeModal","travelModeEventDate","travelModeNextEvent","travelModeLocation","travelModeNavigate","travelModeBooking","data-travel-nav","travelmode=walking","maps.apple.com/directions?destination=","mode=walking","https://waze.com/ul","tripyRainDrops","radial-gradient(ellipse","prefers-reduced-motion:reduce"); missing=[marker for marker in markers if marker not in html]; assert not missing, "missing live markers: "+", ".join(missing); print("live_travel_mode_markers_verified")'
+          }
+
           mkdir -p "$DATA_DIR"
           if [[ ! -s "$DATA_DIR/trips.json" ]] && docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
             docker cp "$CONTAINER_NAME:/app/data/trips.json" "$DATA_DIR/trips.json" >/dev/null 2>&1 || true
@@ -90,7 +94,7 @@ jobs:
 
           healthy=false
           for attempt in {1..30}; do
-            if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8787/healthz >/dev/null; then
+            if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8787/healthz >/dev/null && verify_live_frontend >/dev/null 2>&1; then
               healthy=true
               break
             fi
@@ -98,7 +102,7 @@ jobs:
           done
 
           if [[ "$healthy" != true ]]; then
-            echo "New container failed health check" >&2
+            echo "New container failed health or live frontend verification" >&2
             docker logs --tail 120 "$CONTAINER_NAME" || true
             docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
             if [[ -n "$previous_image" ]] && docker image inspect "$previous_image" >/dev/null 2>&1; then
@@ -109,6 +113,7 @@ jobs:
           fi
 
           curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8787/healthz
+          verify_live_frontend
           printf '\nDeployment verified: %s\n' "$RELEASE_TAG"
 
       - name: Verify live date display markup
