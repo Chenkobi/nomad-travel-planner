@@ -64,6 +64,13 @@ class EmailIntentTests(unittest.TestCase):
         self.assertEqual(trip["provider"], "trip.com")
         self.assertEqual(trip["confidence"], 0.99)
 
+    def test_booking_category_guard_rejects_footer_restaurant_guess(self):
+        provider = {"provider": "booking.com"}
+        hotel = server.guard_marketplace_category({"type": "restaurant"}, provider, "Booking confirmation Check-in Thu December 10 2026 Check-out Friday December 11 2026 Restaurant recommendations")
+        self.assertEqual(hotel["type"], "hotel")
+        unknown = server.guard_marketplace_category({"type": "restaurant"}, provider, "Booking confirmation PIN You can cancel for free until December 6 2026")
+        self.assertEqual(unknown["type"], "other")
+
     def test_provider_identity_detects_sixt_and_car_rental(self):
         result = identify_email_provider(
             sender="noreply@sixt.com",

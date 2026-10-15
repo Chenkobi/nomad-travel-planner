@@ -1664,6 +1664,7 @@ def process_incoming_email(record):
         ai = gemini_extract(path, mime_type=mime_type, supplemental_text=supplemental_context) or {}
         if ai:
             ai = enrich_ai_with_provider(ai, provider_info)
+            ai = guard_marketplace_category(ai, provider_info, "\n".join((body, attachment_context_for_provider)))
         if not ai:
             final_record_status = "needs_review"
             validation_error_code = "provider_unavailable"
@@ -1941,6 +1942,23 @@ def extract_attraction_facts(text, ai):
             location = re.sub(r"\s+", " ", match.group(0)).strip()
             if re.search(r"Schokoladenplatz\s+1.*?Seestrasse\s+204.*?8802\s+Kilchberg.*?Switzerland", location, re.I): location = "Schokoladenplatz 1, Seestrasse 204, 8802 Kilchberg, Switzerland"
     return {"name": name, "date": date, "time": time_value, "location": location}
+
+
+def guard_marketplace_category(ai, provider_info, text=""):
+    result = dict(ai or {})
+    if str((provider_info or {}).get("provider") or "").strip().casefold() != "booking.com":
+        return result
+    if str(result.get("type") or "").strip().casefold() != "restaurant":
+        return result
+    lowered = str(text or "").casefold()
+    lodging_markers = ("hotel", "resort", "property", "check-in", "check-out", "room", "accommodation")
+    lodging_score = sum(marker in lowered for marker in lodging_markers)
+    restaurant_fact_markers = ("table reservation", "restaurant name", "dining reservation", "party size", "reservation time")
+    if lodging_score >= 2 and not any(marker in lowered for marker in restaurant_fact_markers):
+        result["type"] = "hotel"
+    elif not any(marker in lowered for marker in restaurant_fact_markers):
+        result["type"] = "other"
+    return result
 
 
 def infer_document_type(ai, text="", context=""):
