@@ -49,6 +49,12 @@ _PROVIDER_RULES: tuple[dict[str, Any], ...] = (
         "markers": ("israir", "ישראייר"),
     },
     {
+        "provider": "air_haifa",
+        "category_hint": "flight",
+        "domains": ("airhaifa.com",),
+        "markers": ("air haifa", "אייר חיפה"),
+    },
+    {
         "provider": "el_al_group",
         "category_hint": "flight",
         "domains": ("elal.com", "sundor.co.il"),

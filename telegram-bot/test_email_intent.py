@@ -16,6 +16,16 @@ class EmailIntentTests(unittest.TestCase):
         self.assertEqual(result["category_hint"], "marketplace")
         self.assertGreaterEqual(result["confidence"], 0.9)
 
+    def test_air_haifa_forwarded_header_is_classified_as_flight_provider(self):
+        result = identify_email_provider(
+            sender="Kobi Chen <kobi@kobichen.com>",
+            subject="Fwd: Flight confirmation",
+            body="From: tickets@airhaifa.com\nSubject: Flight confirmation",
+        )
+        self.assertEqual(result["provider"], "air_haifa")
+        self.assertEqual(result["category_hint"], "flight")
+        self.assertGreaterEqual(result["confidence"], 0.8)
+
     def test_current_subject_beats_stale_forwarded_provider_markers(self):
         result = identify_email_provider(
             sender="forwarder@kobichen.com",

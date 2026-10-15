@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-heb && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir pywebpush==2.1.2 webauthn==2.7.0
 COPY index.html /app/index.html
 COPY tripy-icon.png /app/tripy-icon.png

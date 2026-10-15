@@ -1090,7 +1090,8 @@ def normalize_flight_fields(ai, text=""):
     raw_lines = [line.strip() for line in raw_source.splitlines() if line.strip()]
     lines = [line.strip() for line in raw_lines if line.strip()]
     deduped_lines = list(dict.fromkeys(re.sub(r"\s+", " ", line) for line in lines))
-    source = "\n".join(deduped_lines)
+    email_header = re.compile(r"^\s*(?:from|to|reply-to|sender|subject|sent|received)\s*:\s*.*[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}.*$", re.I)
+    source = "\n".join(line for line in deduped_lines if not email_header.match(line))
     lower = source.casefold()
 
     # Arkia's legacy HTML ticket uses a flattened table, a two-digit year,
@@ -1953,7 +1954,7 @@ def process_incoming_email(record):
             path,
         ))
         supplemental_context = "\n".join(part for part in (body[:30000], attachment_context) if part)
-        ai = gemini_extract(path, mime_type=mime_type, supplemental_text=supplemental_context) or {}
+        ai = gemini_extract(path, mime_type=mime_type, supplemental_text=supplemental_context, provider_info=provider_info) or {}
         if ai:
             ai = enrich_ai_with_provider(ai, provider_info)
             if str(provider_info.get("provider") or "").strip().casefold() != "unknown":
@@ -2185,6 +2186,31 @@ def resume_pending_email_processing():
                 update_email_record(intake_id=record.get("id"), status="received", previous_review_reason=reason, processing_error="")
             threading.Thread(target=process_incoming_email, args=(record,), daemon=True).start()
 
+_TESSERACT_OCR_LANGUAGE = None
+
+
+def tesseract_ocr_languages():
+    """Use Hebrew OCR when its trained data is installed; retain English fallback."""
+    global _TESSERACT_OCR_LANGUAGE
+    if _TESSERACT_OCR_LANGUAGE is None:
+        try:
+            result = subprocess.run(["tesseract", "--list-langs"], capture_output=True, text=True, timeout=10)
+            languages = {
+                line.strip()
+                for line in (str(result.stdout or "") + "\n" + str(result.stderr or "")).splitlines()
+                if line.strip() and not line.casefold().startswith("list of available languages")
+            }
+        except (OSError, subprocess.SubprocessError):
+            languages = set()
+        if {"eng", "heb"}.issubset(languages):
+            _TESSERACT_OCR_LANGUAGE = "eng+heb"
+        elif "heb" in languages:
+            _TESSERACT_OCR_LANGUAGE = "heb"
+        else:
+            _TESSERACT_OCR_LANGUAGE = "eng"
+    return _TESSERACT_OCR_LANGUAGE
+
+
 def extract_pdf_text(path):
     text = ""
     image_suffixes = {".jpg", ".jpeg", ".png", ".webp"}
@@ -2196,7 +2222,7 @@ def extract_pdf_text(path):
         except OSError: return ""
     try:
         if path.suffix.lower() in image_suffixes:
-            result = subprocess.run(["tesseract", str(path), "stdout", "-l", "eng"], capture_output=True, text=True, timeout=45)
+            result = subprocess.run(["tesseract", str(path), "stdout", "-l", tesseract_ocr_languages()], capture_output=True, text=True, timeout=45)
             return result.stdout if result.returncode == 0 else ""
         result = subprocess.run(["pdftotext", str(path), "-"], capture_output=True, text=True, timeout=20)
         if result.returncode == 0: text = result.stdout
@@ -2206,17 +2232,36 @@ def extract_pdf_text(path):
             prefix = str(Path(d) / "page")
             subprocess.run(["pdftoppm", "-f", "1", "-l", "3", "-r", "200", "-png", str(path), prefix], capture_output=True, timeout=45, check=True)
             for image in sorted(Path(d).glob("page-*.png")):
-                result = subprocess.run(["tesseract", str(image), "stdout", "-l", "eng"], capture_output=True, text=True, timeout=30)
+                result = subprocess.run(["tesseract", str(image), "stdout", "-l", tesseract_ocr_languages()], capture_output=True, text=True, timeout=30)
                 if result.returncode == 0: text += "\n" + result.stdout
     except (OSError, subprocess.SubprocessError): pass
     if text.strip(): return text
     try: return path.read_bytes().decode("utf-8", errors="ignore")
     except OSError: return ""
 
-def gemini_extract(path, mime_type=None, supplemental_text=""):
+def gemini_prompt_context(provider_info=None):
+    """Return a bounded multilingual prior without trusting raw provider text."""
+    context = (
+        " Read the source in its original language, including Hebrew; translate labels internally when needed, but preserve source facts."
+        " If a date year is not explicit or unambiguously supported by the source, leave it empty; never infer a year that is not supported by the source."
+    )
+    info = provider_info if isinstance(provider_info, dict) else {}
+    provider = str(info.get("provider") or "").strip().casefold()
+    category = str(info.get("category_hint") or "").strip().casefold()
+    if re.fullmatch(r"[a-z0-9_.-]{1,40}", provider) and provider != "unknown" and category in {"marketplace", "hotel", "flight", "car_rental"}:
+        context += (
+            f" Detected provider evidence: {provider}; category hint: {category}."
+            " Provider evidence is only a prior, not a booking fact; validate the category and every extracted value against the source."
+            " A marketplace can sell different booking types, so never infer type from marketplace identity alone."
+        )
+    return context
+
+
+def gemini_extract(path, mime_type=None, supplemental_text="", provider_info=None):
     if not GEMINI_API_KEY: return None
     schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","restaurant","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"segments":{"type":"array","items":{"type":"object","properties":{"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"}}}},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"restaurant_name":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"address":{"type":"string"},"phone":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},"policy_number":{"type":"string"},"insurer":{"type":"string"},"insured_travelers":{"type":"array","items":{"type":"string"}},"valid_from":{"type":"string"},"valid_to":{"type":"string"},"coverage_summary":{"type":"string"},"covered_items":{"type":"array","items":{"type":"string"}},"exclusions":{"type":"array","items":{"type":"string"}},"what_to_do":{"type":"array","items":{"type":"string"}},"emergency_contacts":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"phone":{"type":"string"},"hours":{"type":"string"}}}},"source_language":{"type":"string"},"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type","status"]}
     prompt = "Classify this travel document, email or screenshot and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, restaurant, insurance, or other. For every date field, return ISO YYYY-MM-DD only; for every time field, return 24-hour HH:MM only; if the source does not state a fact unambiguously, return an empty string. status must describe the lifecycle of this booking message: confirmed for a new/active reservation, modified only when the reservation dates, route, room, passenger, or other booking facts were actually changed, cancelled only when the reservation itself was cancelled, and refunded only when a refund was actually issued. Do not infer modified or cancelled from generic footer text, a cancellation policy, refund policy, last-updated timestamps, account links, or instructions to update preferences. Never guess; use empty strings or empty arrays when a fact is absent. A flight requires airline, flight_number, origin, destination, departure_date, departure_time, and arrival_time when clearly present. A car rental requires pickup_date, pickup_time, pickup_location, and vehicle_type; preserve dropoff fields when clearly present. A restaurant reservation must include restaurant_name, date and time, and address/phone when clearly present. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel. Insurance is one trip-level policy: preserve only source facts, translate concise coverage and emergency instructions into plain Hebrew when the source is not Hebrew, and keep the original document as the source of truth. Do not invent coverage, exclusions, phone numbers, or medical advice."
+    prompt += gemini_prompt_context(provider_info)
     mime_type = mime_type or {".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".png":"image/png", ".webp":"image/webp", ".txt":"text/plain", ".html":"text/html", ".htm":"text/html"}.get(path.suffix.lower(), "application/pdf")
     source_text = extract_pdf_text(path)
     supplemental_text = re.sub(r"\s+", " ", str(supplemental_text or "")).strip()

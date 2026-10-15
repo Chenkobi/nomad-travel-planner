@@ -1,11 +1,46 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import server
 
 
 class FlightTextFallbackTests(unittest.TestCase):
+    def test_release_image_includes_hebrew_tesseract_training_data(self):
+        dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
+        self.assertIn("tesseract-ocr-heb", dockerfile.read_text(encoding="utf-8"))
+
+    def test_tesseract_language_detection_uses_hebrew_when_installed(self):
+        result = SimpleNamespace(returncode=0, stdout="List of available languages (3):\neng\nheb\nosd\n", stderr="")
+        with patch.object(server.subprocess, "run", return_value=result) as run:
+            server._TESSERACT_OCR_LANGUAGE = None
+            self.assertEqual(server.tesseract_ocr_languages(), "eng+heb")
+        run.assert_called_once_with(["tesseract", "--list-langs"], capture_output=True, text=True, timeout=10)
+
+    def test_pdf_ocr_uses_detected_multilingual_language_pack(self):
+        with TemporaryDirectory() as directory:
+            pdf = Path(directory) / "scan.pdf"
+            pdf.write_bytes(b"test")
+            calls = []
+
+            def fake_run(args, **kwargs):
+                calls.append(args)
+                if args[0] == "pdftotext":
+                    return SimpleNamespace(returncode=1, stdout="", stderr="")
+                if args[0] == "pdftoppm":
+                    Path(args[-1] + "-1.png").touch()
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                if args[0] == "tesseract":
+                    return SimpleNamespace(returncode=0, stdout="OCR result", stderr="")
+                raise AssertionError(args[0])
+
+            with patch.object(server, "tesseract_ocr_languages", return_value="eng+heb"), patch.object(server.subprocess, "run", side_effect=fake_run):
+                self.assertEqual(server.extract_pdf_text(pdf), "\nOCR result")
+            ocr_call = next(args for args in calls if args[0] == "tesseract")
+            self.assertEqual(ocr_call[ocr_call.index("-l") + 1], "eng+heb")
+
     def test_arkia_cp1255_html_is_decoded_without_replacement_characters(self):
         html = '<meta http-equiv="Content-Type" content="text/html; charset=windows-1255">ארקיע'
         decoded = server.decode_html_bytes(html.encode("cp1255"))
@@ -48,6 +83,18 @@ OK"""
         self.assertEqual(result["departure_date"], "2026-12-10")
         self.assertEqual(result["departure_time"], "08:30")
         self.assertEqual(result["arrival_time"], "10:40")
+
+    def test_forwarded_email_address_headers_do_not_clear_ai_route(self):
+        text = (
+            "From: tickets@airhaifa.com\n"
+            "Subject: Flight confirmation\n"
+            "Origin: TLV\nDestination: ATH"
+        )
+        result = server.normalize_flight_fields(
+            {"type": "flight", "origin": "TLV", "destination": "ATH"}, text
+        )
+        self.assertEqual(result["origin"], "TLV")
+        self.assertEqual(result["destination"], "ATH")
 
     def test_ai_values_are_preserved_over_text_fallback(self):
         text = "Arkia IZ 138\nTel Aviv to Athens\nDecember 10, 2026 08:30\nArrival 10:40"

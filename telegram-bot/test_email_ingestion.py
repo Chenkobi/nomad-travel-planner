@@ -390,13 +390,16 @@ class EmailIngestionTests(unittest.TestCase):
                 record, _ = server.store_incoming_email(message.as_bytes())
                 captured = {}
                 ai = {'type': 'hotel', 'status': 'confirmed', 'hotel': 'Test Hotel', 'city': 'Paris', 'country': 'France', 'check_in': '2026-10-20', 'check_out': '2026-10-23'}
-                def extract(path, mime_type=None, supplemental_text=''):
+                def extract(path, mime_type=None, supplemental_text='', provider_info=None):
                     captured['supplemental_text'] = supplemental_text
+                    captured['provider_info'] = provider_info
                     return ai
                 with patch.object(server, 'gemini_extract', side_effect=extract), patch.object(server, 'send'):
                     server.process_incoming_email(record)
                 self.assertIn('Property: Test Hotel', captured['supplemental_text'])
                 self.assertIn('Check-out: 2026-10-23', captured['supplemental_text'])
+                self.assertEqual(captured['provider_info']['provider'], 'booking.com')
+                self.assertEqual(captured['provider_info']['category_hint'], 'marketplace')
             finally:
                 server.TRIPS, server.UPLOADS = old_trips, old_uploads
                 server.EMAIL_DIR, server.EMAIL_INDEX = old_dir, old_index

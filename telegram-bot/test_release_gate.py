@@ -101,6 +101,23 @@ class ReleaseGateMatrixTests(unittest.TestCase):
                 self.assertEqual(record["provider_category_hint"], "marketplace")
         self.assertEqual(len(server.load_trips()), 2)
 
+    def test_air_haifa_forwarded_flight_uses_provider_context_and_persists(self):
+        record = self._email(
+            "forwarder@kobichen.com", "Fwd: Flight confirmation",
+            "From: tickets@airhaifa.com\nSubject: Flight confirmation\n"
+            "Airline: Air Haifa\nFlight number: AH 123\nOrigin: TLV\nDestination: ATH\n"
+            "Departure date: 2027-06-01\nDeparture time: 09:10\nArrival time: 11:35",
+        )
+        ai = {"type": "other", "status": "confirmed", "airline": "Air Haifa", "flight_number": "AH 123", "origin": "TLV", "destination": "ATH", "departure_date": "2027-06-01", "departure_time": "09:10", "arrival_time": "11:35"}
+        with patch.object(server, "gemini_extract", return_value=ai) as gemini, patch.object(server, "send"), patch.object(server, "send_push_notification"):
+            server.process_incoming_email(record)
+        self.assertEqual(gemini.call_args.kwargs["provider_info"]["provider"], "air_haifa")
+        saved = next(item for item in server.load_email_index() if item["id"] == record["id"])
+        self.assertEqual(saved["status"], "processed")
+        self.assertEqual(saved["ingested_type"], "flight")
+        trip = next(item for item in server.load_trips() if item["id"] == saved["trip_id"])
+        self.assertEqual(len(trip["flights"]), 1)
+
     def test_airline_and_car_rental_provider_hints_reach_persistence(self):
         flight = self._process(
             "confirmation@wizzair.com", "Wizz Air flight confirmation",
