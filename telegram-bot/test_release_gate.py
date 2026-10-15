@@ -73,6 +73,18 @@ class ReleaseGateMatrixTests(unittest.TestCase):
         self.assertEqual((trip["start"], trip["end"]), ("2027-05-04", "2027-05-07"))
         self.assertEqual(trip["destinations"][0]["city"], "Example Bay")
 
+    def test_successful_reprocessing_clears_stale_review_reason(self):
+        record = self._email(
+            "confirmation@booking.com", "Hotel booking confirmation",
+            "Booking confirmed. Hotel: Example Hotel. Check-in: 2027-06-10. Check-out: 2027-06-12.",
+        )
+        server.update_email_record(record["id"], status="received", review_reason="obsolete_missing_fields")
+        with patch.object(server, "gemini_extract", return_value=self._hotel_ai()), patch.object(server, "send"), patch.object(server, "send_push_notification"):
+            server.process_incoming_email(record)
+        saved = next(item for item in server.load_email_index() if item["id"] == record["id"])
+        self.assertEqual(saved["status"], "processed")
+        self.assertEqual(saved.get("review_reason", ""), "")
+
     def test_booking_and_trip_com_marketplace_hotels_are_processed(self):
         for sender, provider, dates in (
             ("confirmation@booking.com", "booking.com", ("2026-10-20", "2026-10-23")),

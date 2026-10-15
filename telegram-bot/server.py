@@ -2033,7 +2033,7 @@ def process_incoming_email(record):
             final_record_status = "processed"
             telemetry_outcome = "success"
             persistence_outcome = "updated" if had_persisted_trip else "created"
-            update_email_record(intake_id, status="processed", intent=intent, processed_at=_utc_now().isoformat(), ingested_type=ai.get("type") or trip.get("_ingested_type") or "other", trip_id=trip.get("id"), document=filename, processing_error="")
+            update_email_record(intake_id, status="processed", intent=intent, processed_at=_utc_now().isoformat(), ingested_type=ai.get("type") or trip.get("_ingested_type") or "other", trip_id=trip.get("id"), document=filename, processing_error="", review_reason="")
             if TOKEN and ALLOWED_CHAT:
                 send(ALLOWED_CHAT, email_notification(intent, record, trip=trip))
             return record
