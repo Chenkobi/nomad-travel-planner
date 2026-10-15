@@ -6,6 +6,7 @@ import re
 from typing import Any, Mapping
 
 from booking_extraction import extract_booking_facts
+from semantic_hotel import understand_hotel_reservation
 
 
 _TYPE_ALIASES = {
@@ -79,6 +80,15 @@ def normalize_booking_facts(
     source_facts = dict(text_facts.get("facts") or {})
     source_facts.update(extracted.get("facts") or {})
     source_facts.update({key: extracted.get(key) for key in _FACT_KEYS if extracted.get(key) not in (None, "", [], {})})
+    semantic_hotel = understand_hotel_reservation(subject, body)
+    semantic_values = semantic_hotel.get("facts") or {}
+    if semantic_hotel.get("intent") == "reservation" and (semantic_values.get("hotel") or {}).get("value"):
+        for key in ("hotel", "city", "check_in", "check_out"):
+            value = (semantic_values.get(key) or {}).get("value")
+            if value and not source_facts.get(key):
+                source_facts[key] = value
+        if declared_type == "other" and fact_type == "other":
+            normalized_type = "hotel"
     for key in _FACT_KEYS:
         value = source_facts.get(key)
         if value in (None, "", [], {}):
@@ -107,5 +117,6 @@ def merge_normalized_booking_facts(extracted: Mapping[str, Any] | None, contract
     if not _text(result.get("status")) or _text(result.get("status")).casefold() == "unknown":
         result["status"] = contract.get("status", "unknown")
     for key, value in (contract.get("facts") or {}).items():
-        result.setdefault(key, value)
+        if value and not _text(result.get(key)):
+            result[key] = value
     return result

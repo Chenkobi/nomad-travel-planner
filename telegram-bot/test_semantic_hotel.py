@@ -30,4 +30,14 @@ class SemanticHotelTests(unittest.TestCase):
  def test_ambiguous_or_missing_dates_review(self):
   r=understand_hotel_reservation("Reservation","Hotel: Example House\nCheck-in: 05/06/2027\nCheck-out: 08/06/2027"); self.assertEqual(r["decision"],"review"); self.assertIsNone(r["facts"]["check_in"]["value"])
   r=understand_hotel_reservation("Reservation confirmation","Hotel: Example House\nCheck-in: 12 April 2027"); self.assertEqual(r["decision"],"review"); self.assertIsNone(r["facts"]["check_out"]["value"])
+ def test_booking_confirmation_accepts_labeled_weekday_dates(self):
+  r=understand_hotel_reservation(
+   "Booking confirmation",
+   "Your booking is confirmed at Example Resort.\nDestination: Example Bay\nCheck-in date: Tuesday, May 4, 2027\nCheck-out date: Friday, May 7, 2027",
+  )
+  self.assertEqual(r["decision"], "accept")
+  self.assertEqual(r["facts"]["city"]["value"], "Example Bay")
+  self.assertEqual(r["facts"]["check_in"]["value"], "2027-05-04")
+  self.assertEqual(r["facts"]["check_out"]["value"], "2027-05-07")
+
 if __name__=='__main__': unittest.main()

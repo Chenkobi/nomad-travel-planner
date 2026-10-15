@@ -1,6 +1,6 @@
 import unittest
 
-from booking_facts import normalize_booking_facts
+from booking_facts import merge_normalized_booking_facts, normalize_booking_facts
 from booking_extraction import extract_booking_facts
 from provider_rules import identify_email_provider
 
@@ -24,6 +24,45 @@ class BookingFactsContractTests(unittest.TestCase):
                 "check_out": "2027-04-15",
             },
         })
+
+    def test_semantic_hotel_facts_fill_fields_omitted_by_extractor(self):
+        result = normalize_booking_facts(
+            {"type": "hotel", "status": "confirmed"},
+            subject="Booking confirmation",
+            body=(
+                "Your booking is confirmed at Example Resort.\n"
+                "Destination: Example Bay\n"
+                "Check-in date: Tuesday, May 4, 2027\n"
+                "Check-out date: Friday, May 7, 2027"
+            ),
+        )
+        self.assertEqual(result["facts"], {
+            "hotel": "Example Resort",
+            "city": "Example Bay",
+            "check_in": "2027-05-04",
+            "check_out": "2027-05-07",
+        })
+
+    def test_normalized_facts_replace_blank_model_fields(self):
+        extracted = {
+            "type": "hotel", "status": "confirmed",
+            "hotel": "", "city": "", "check_in": "", "check_out": "",
+        }
+        contract = normalize_booking_facts(
+            extracted,
+            subject="Booking confirmation",
+            body=(
+                "Your booking is confirmed at Example Resort.\n"
+                "Destination: Example Bay\n"
+                "Check-in date: Tuesday, May 4, 2027\n"
+                "Check-out date: Friday, May 7, 2027"
+            ),
+        )
+        merged = merge_normalized_booking_facts(extracted, contract)
+        self.assertEqual(
+            {key: merged[key] for key in ("hotel", "city", "check_in", "check_out")},
+            {"hotel": "Example Resort", "city": "Example Bay", "check_in": "2027-05-04", "check_out": "2027-05-07"},
+        )
 
     def test_flight_facts_normalize_type_and_flight_number(self):
         result = normalize_booking_facts({

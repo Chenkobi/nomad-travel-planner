@@ -4,7 +4,7 @@ from html import unescape
 import re
 
 MONTHS={"january":1,"february":2,"march":3,"april":4,"may":5,"june":6,"july":7,"august":8,"september":9,"october":10,"november":11,"december":12,"jan":1,"feb":2,"mar":3,"apr":4,"jun":6,"jul":7,"aug":8,"sep":9,"sept":9,"oct":10,"nov":11,"dec":12,"ינואר":1,"פברואר":2,"מרץ":3,"אפריל":4,"מאי":5,"יוני":6,"יולי":7,"אוגוסט":8,"ספטמבר":9,"אוקטובר":10,"נובמבר":11,"דצמבר":12}
-LABELS={"hotel":("hotel","property","accommodation","מלון","שם המלון"),"city":("city","destination","location","עיר","יעד"),"check_in":("check-in","check in","arrival","arrival date","צ'ק-אין","צ׳ק-אין","הגעה"),"check_out":("check-out","check out","departure","departure date","צ'ק-אאוט","צ׳ק-אאוט","עזיבה")}
+LABELS={"hotel":("hotel","property","accommodation","מלון","שם המלון"),"city":("city","destination","location","עיר","יעד"),"check_in":("check-in date","check in date","check-in","check in","arrival date","arrival","צ'ק-אין","צ׳ק-אין","הגעה"),"check_out":("check-out date","check out date","check-out","check out","departure date","departure","צ'ק-אאוט","צ׳ק-אאוט","עזיבה")}
 
 def _plain(s):
     s=re.sub(r"</?(?:br|div|p|li|tr|h[1-6]|td)[^>]*>","\n",s or "",flags=re.I); s=re.sub(r"<[^>]+>"," ",s); s=unescape(s).replace("\xa0"," ")
@@ -12,6 +12,7 @@ def _plain(s):
 
 def _date(s):
     s=re.sub(r"\s+"," ",(s or "").strip().replace(",",""))
+    s=re.sub(r"^(?:mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\s+", "", s, flags=re.I)
     m=re.fullmatch(r"(\d{1,2})[/. -](\d{1,2})[/. -](20\d{2})",s)
     if m:
         a,b,y=map(int,m.groups())

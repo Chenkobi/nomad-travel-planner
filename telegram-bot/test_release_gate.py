@@ -56,6 +56,23 @@ class ReleaseGateMatrixTests(unittest.TestCase):
         self.assertEqual(record["provider"], "marriott")
         self.assertEqual(server.load_trips()[0]["hotels"][0]["name"], "Marriott Example")
 
+    def test_booking_confirmation_with_omitted_ai_fields_persists_complete_hotel(self):
+        record = self._process(
+            "confirmation@booking.com",
+            "Booking confirmation",
+            "Your booking is confirmed at Example Resort.\n"
+            "Destination: Example Bay\n"
+            "Check-in date: Tuesday, May 4, 2027\n"
+            "Check-out date: Friday, May 7, 2027",
+            {"type": "hotel", "status": "confirmed", "hotel": "", "city": "", "check_in": "", "check_out": ""},
+        )
+        self.assertEqual(record["status"], "processed")
+        self.assertEqual(record["ingested_type"], "hotel")
+        trip = next(item for item in server.load_trips() if item["id"] == record["trip_id"])
+        self.assertEqual(trip["hotel"], "Example Resort")
+        self.assertEqual((trip["start"], trip["end"]), ("2027-05-04", "2027-05-07"))
+        self.assertEqual(trip["destinations"][0]["city"], "Example Bay")
+
     def test_booking_and_trip_com_marketplace_hotels_are_processed(self):
         for sender, provider, dates in (
             ("confirmation@booking.com", "booking.com", ("2026-10-20", "2026-10-23")),
