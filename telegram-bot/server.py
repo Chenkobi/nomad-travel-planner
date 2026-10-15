@@ -1801,6 +1801,9 @@ def repair_trip_titles_from_bookings():
         save_trips(trips)
 
 
+SEMANTIC_RECOVERY_VERSION = "semantic-hotel-v1"
+
+
 def resume_pending_email_processing():
     repair_trip_titles_from_bookings()
     retryable_errors = {
@@ -1829,8 +1832,11 @@ def resume_pending_email_processing():
             and reason == "ValueError: restaurant reservation missing name, date, or time"
             and not record.get("restaurant_recovery_attempted")
         )
-        retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors) or recent_lifecycle_retry or restaurant_recovery
+        semantic_recovery = status == "needs_review" and record.get("semantic_recovery_version") != SEMANTIC_RECOVERY_VERSION
+        retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors) or recent_lifecycle_retry or restaurant_recovery or semantic_recovery
         if retryable:
+            if semantic_recovery:
+                update_email_record(intake_id=record.get("id"), semantic_recovery_version=SEMANTIC_RECOVERY_VERSION)
             if recent_lifecycle_retry:
                 update_email_record(intake_id=record.get("id"), lifecycle_recovery_attempted=True)
             if restaurant_recovery:
