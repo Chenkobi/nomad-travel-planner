@@ -192,6 +192,56 @@ Drop-off location: Milan Airport Malpensa T1""", encoding="utf-8")
         with self.assertRaises(ValueError):
             server.create_dated_trip_shell([], '2026-12-10', '2026-12-09', 'Email', 'bad.txt')
 
+    def test_trip_com_hotel_is_attached_to_existing_dated_trip(self):
+        """Marketplace email facts route into the matching trip, not a duplicate."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_data, old_trips, old_uploads = server.DATA, server.TRIPS, server.UPLOADS
+            try:
+                server.DATA = root / 'events.json'; server.TRIPS = root / 'trips.json'; server.UPLOADS = root / 'uploads'
+                existing = {
+                    'id': 'trip-existing', 'title': 'Synthetic trip',
+                    'start': '2026-10-20', 'end': '2026-10-23',
+                    'days': 4, 'source': 'Manual', 'documents': ['manual.txt'],
+                    'document_titles': {'manual.txt': 'Synthetic itinerary'},
+                    'destinations': [{'city': 'Batumi', 'country': 'Georgia'}],
+                    'hotels': [], 'flights': [], 'trains': [], 'attractions': [],
+                    'rentals': [], 'restaurants': [],
+                }
+                server.save_trips([existing]); server.save_events([])
+                path = root / 'trip-com.txt'
+                path.write_text(
+                    'Trip.com reservation confirmation\\n'
+                    'Check-in: October 21, 2026\\n'
+                    'Check-out: October 22, 2026\\n'
+                    'Property: Synthetic Harbor Hotel\\n',
+                    encoding='utf-8',
+                )
+                provider = server.identify_email_provider(
+                    sender='booking@trip.com',
+                    subject='Your Trip.com hotel reservation is confirmed',
+                    body='Synthetic Harbor Hotel',
+                )
+                self.assertEqual(provider['provider'], 'trip.com')
+                trip = server.create_trip_from_document(
+                    'trip-com.txt', path, source='Email',
+                    ai_override={
+                        'type': 'hotel', 'status': 'confirmed',
+                        'hotel': 'Synthetic Harbor Hotel', 'city': 'Batumi',
+                        'country': 'Georgia',
+                        'check_in': 'October 21, 2026',
+                        'check_out': 'October 22, 2026',
+                    },
+                )
+                saved = json.loads(server.TRIPS.read_text())
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(trip['id'], 'trip-existing')
+                self.assertEqual(saved[0]['hotels'][0]['name'], 'Synthetic Harbor Hotel')
+                self.assertEqual(saved[0]['hotels'][0]['start'], '2026-10-21')
+                self.assertIn('trip-com.txt', saved[0]['documents'])
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
+
     def test_hotel_documents_within_fourteen_days_are_not_broadly_merged(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

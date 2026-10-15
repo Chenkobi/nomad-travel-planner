@@ -2103,8 +2103,8 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         m1, d1, y1, m2, d2, y2 = table_dates[0]
         dates = [(y1, months[m1[:3].upper()], d1.zfill(2)), (y2, months[m2[:3].upper()], d2.zfill(2))]
     elif label_dates: dates = [(y, months[m[:3].upper()], d.zfill(2)) for m, d, y in label_dates]
-    ai_dates = [str(ai.get("check_in") or "").strip(), str(ai.get("check_out") or "").strip()]
-    if all(re.fullmatch(r"20\d{2}-\d{2}-\d{2}", value) for value in ai_dates): dates = [(value[:4], value[5:7], value[8:10]) for value in ai_dates]
+    ai_dates = [normalize_date_value(str(ai.get("check_in") or "").strip()), normalize_date_value(str(ai.get("check_out") or "").strip())]
+    if all(ai_dates): dates = [(value[:4], value[5:7], value[8:10]) for value in ai_dates]
     start = "-".join(dates[0]) if dates else ""
     end = "-".join(dates[-1]) if len(dates) > 1 else start
     start, end = validate_date_range(start, end)
@@ -2131,6 +2131,8 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         except (TypeError, ValueError): return None
     new_start, new_end = as_date(start), as_date(end)
     match = next((existing for existing in trips if existing.get("document") == filename or filename in existing.get("documents", [])), None)
+    if not match and start:
+        match = dated_trip_target(trips, start)
     if match:
         old_start, old_end = as_date(match.get("start")), as_date(match.get("end"))
         merged_start = min(x for x in (old_start, new_start) if x)
