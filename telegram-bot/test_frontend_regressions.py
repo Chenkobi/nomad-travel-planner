@@ -43,6 +43,11 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertNotIn("מתעדכן מאישורי Telegram", INDEX)
         self.assertIn("מתעדכן מאישורי מייל", INDEX)
 
+    def test_old_day_details_section_is_removed(self):
+        self.assertNotIn('<h2>פרטי היום</h2>', INDEX)
+        self.assertNotIn('id="countryDetails"', INDEX)
+        self.assertNotIn('id="hotelDetails"', INDEX)
+
     def test_trip_centered_navigation_has_tools_sheet_and_current_day_logic(self):
         self.assertIn('id="openTripTools"', INDEX)
         self.assertIn('id="tripToolsModal"', INDEX)

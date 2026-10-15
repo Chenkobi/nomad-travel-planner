@@ -657,7 +657,7 @@ def store_incoming_email(raw):
             suffix = Path(str(item.get("filename") or "")).suffix.lower()
             if item.get("content_type") == "text/html" or suffix in {".html", ".htm"}:
                 try:
-                    attachment_text.append(html_to_text((folder / str(item["path"])).read_text(encoding="utf-8", errors="replace")))
+                    attachment_text.append(html_to_text(decode_html_bytes((folder / str(item["path"])).read_bytes())))
                 except (OSError, UnicodeError):
                     pass
         provider_source = "\n".join((
@@ -940,6 +940,26 @@ class _EmailHTMLText(HTMLParser):
             self.parts.append(data)
 
 
+def decode_html_bytes(value):
+    """Decode HTML attachments using their declared charset, with safe fallbacks."""
+    raw = bytes(value or b"")
+    head = raw[:8192].decode("ascii", errors="ignore")
+    match = re.search(r"charset\s*=\s*[\"']?\s*([A-Za-z0-9._:-]+)", head, re.I)
+    declared = (match.group(1).lower() if match else "")
+    aliases = {"windows-1255": "cp1255", "iso-8859-8": "cp1255", "hebrew": "cp1255"}
+    candidates = [aliases.get(declared, declared), "utf-8", "cp1255", "latin-1"]
+    seen = set()
+    for encoding in candidates:
+        if not encoding or encoding in seen:
+            continue
+        seen.add(encoding)
+        try:
+            return raw.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("latin-1", errors="replace")
+
+
 def html_to_text(value):
     parser = _EmailHTMLText()
     try:
@@ -1032,6 +1052,26 @@ def normalize_flight_fields(ai, text=""):
     deduped_lines = list(dict.fromkeys(re.sub(r"\s+", " ", line) for line in lines))
     source = "\n".join(deduped_lines)
     lower = source.casefold()
+
+    # Arkia's legacy HTML ticket uses a flattened table, a two-digit year,
+    # and HHMM times. Parse that exact row before generic fallbacks lose context.
+    arkia_row = re.search(
+        r"(?im)^([A-Z][A-Z0-9 ()-]{2,40})\n(?:Terminal:\s*\d+\n)?"
+        r"([A-Z][A-Z0-9 ()-]{2,40})\n(IZ\s?\d{1,4})\n[A-Z]\n"
+        r"(\d{1,2}\s+[A-Z]{3}\s+\d{2})\n(\d{4})\nOK(?:\n|$)",
+        source,
+    )
+    if "arkia" in lower and arkia_row:
+        arkia_origin, arkia_destination, arkia_number, arkia_date, arkia_time = arkia_row.groups()
+        result.setdefault("airline", "Arkia")
+        result.setdefault("flight_number", _normalize_flight_number(arkia_number))
+        result.setdefault("origin", arkia_origin.strip())
+        result.setdefault("destination", arkia_destination.strip())
+        try:
+            result.setdefault("departure_date", datetime.strptime(arkia_date, "%d %b %y").date().isoformat())
+        except ValueError:
+            pass
+        result.setdefault("departure_time", f"{arkia_time[:2]}:{arkia_time[2:]}")
 
     def set_if_missing(key, values, normalizer=lambda value: value):
         if str(result.get(key) or "").strip():
@@ -1327,7 +1367,7 @@ def email_attachment_text_context(record, max_chars=30000, exclude_path=None):
         suffix = Path(str(attachment.get("filename") or source.name)).suffix.lower()
         try:
             if suffix in {".html", ".htm"} or attachment.get("content_type") == "text/html":
-                text = html_to_text(source.read_text(encoding="utf-8", errors="replace"))
+                text = html_to_text(decode_html_bytes(source.read_bytes()))
             elif suffix in {".pdf", ".txt"} or attachment.get("content_type") == "application/pdf":
                 text = extract_pdf_text(source)
             else:

@@ -6,6 +6,38 @@ import server
 
 
 class FlightTextFallbackTests(unittest.TestCase):
+    def test_arkia_cp1255_html_is_decoded_without_replacement_characters(self):
+        html = '<meta http-equiv="Content-Type" content="text/html; charset=windows-1255">ארקיע'
+        decoded = server.decode_html_bytes(html.encode("cp1255"))
+        self.assertIn("ארקיע", decoded)
+        self.assertNotIn("�", decoded)
+
+    def test_arkia_ticket_table_fills_facts_with_legacy_formats(self):
+        text = """Arkia Israeli Airlines
+From
+To
+Flight
+Class
+Date
+Dep.Local
+Time
+Status
+BATUMI(BUS)
+Terminal: 1
+TEL-AVIV(TLV)
+IZ414
+Y
+26 OCT 26
+1415
+OK"""
+        result = server.normalize_flight_fields({}, text)
+        self.assertEqual(result["airline"], "Arkia")
+        self.assertEqual(result["flight_number"], "IZ414")
+        self.assertEqual(result["origin"], "BATUMI(BUS)")
+        self.assertEqual(result["destination"], "TEL-AVIV(TLV)")
+        self.assertEqual(result["departure_date"], "2026-10-26")
+        self.assertEqual(result["departure_time"], "14:15")
+
     def test_arkia_html_text_fills_explicit_flight_facts_when_ai_misses_fields(self):
         text = "Arkia IZ 138\nTel Aviv to Athens\nDecember 10, 2026 08:30\nArrival 10:40"
         result = server.normalize_flight_fields({"type": "flight", "status": "confirmed"}, text)
