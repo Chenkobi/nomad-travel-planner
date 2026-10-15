@@ -211,8 +211,8 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
         validation, trip, persistence, stage, diagnosis = _outcomes(record, telemetry, field_presence)
         status = str(record.get("status") or "unknown")
         status = status if status in {"processed", "needs_review", "failed", "ignored", "received", "processing"} else "unknown"
-        reason_code = str(telemetry.get("validation_error_code") or "none").strip().lower()
-        reason_code = reason_code if reason_code in ALLOWED_ERRORS else "other_error"
+        reason_code = str(telemetry.get("validation_error_code") or "").strip().lower()
+        reason_code = "none" if not reason_code else reason_code if reason_code in ALLOWED_ERRORS else "other_error"
         provider_outcomes[f"{provider.get('provider', 'unknown')}|{category or 'unknown'}|{status}|{reason_code}"] += 1
         received = str(record.get("received_at") or record.get("created_at") or record.get("timestamp") or "")
         order = (bool(received), received, index)
@@ -229,6 +229,9 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
                 "stage": stage,
                 "diagnosis": diagnosis,
                 "failure_code": reason_code,
+                "trip_match": trip,
+                "persistence": persistence,
+                "trip_id_present": bool(str(record.get("trip_id") or "").strip()),
                 "failed_field": str(telemetry.get("validation_error_field") or "") if str(telemetry.get("validation_error_field") or "") in FACT_FIELDS.get(category, ()) else "",
                 "missing_fields": sorted(field for field, presence in field_presence.items() if presence == "missing"),
             }

@@ -207,9 +207,15 @@ class AuditHarnessTests(unittest.TestCase):
                     capture_output=True,
                     text=True,
                 )
+                report = json.loads(result.stdout)
+                summary = report["latest_record_summary"]
+                self.assertEqual(report["records"], 1)
+                self.assertEqual(summary["trip_match"], "matched")
+                self.assertEqual(summary["persistence"], "created")
+                self.assertTrue(summary["trip_id_present"])
+                self.assertEqual(summary["failure_code"], "none")
                 self.assertNotIn("private-record", result.stdout)
                 self.assertNotIn("not-emitted-address", result.stdout)
-                self.assertEqual(json.loads(result.stdout)["records"], 1)
 
 
 if __name__ == "__main__":
