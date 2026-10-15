@@ -129,6 +129,28 @@ class AuditHarnessTests(unittest.TestCase):
             self.assertNotIn("Private Hotel", result.stdout)
             self.assertNotIn("Private City", result.stdout)
 
+    def test_latest_cancellation_record_exposes_only_safe_intent_conflict_and_match_stage(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            intake = Path(tmp)
+            (intake / "index.json").write_text(json.dumps([{
+                "id": "private-record", "status": "needs_review", "received_at": "2026-10-15T13:00:00Z",
+                "subject": "Private hotel booking subject", "from": "private@example.test", "intent": "cancelled",
+                "ingested_type": "hotel", "processing_stage": "unknown",
+                "extraction_telemetry": [{"validation_error_code": "no_unique_match"}],
+            }]), encoding="utf-8")
+            folder = intake / "private-record"
+            folder.mkdir()
+            (folder / "body.txt").write_text("Your reservation is confirmed. Free cancellation until 2026-10-20.", encoding="utf-8")
+            result = subprocess.run([sys.executable, str(TOOL), str(intake)], cwd=ROOT, check=True, capture_output=True, text=True)
+            latest = json.loads(result.stdout)["latest_record_summary"]
+            self.assertEqual(latest["intent"], "cancelled")
+            self.assertEqual(latest["source_intent"], "confirmed")
+            self.assertFalse(latest["source_intent_matches_record"])
+            self.assertEqual(latest["stage"], "matching")
+            self.assertNotIn("Private hotel booking subject", result.stdout)
+            self.assertNotIn("Your reservation is confirmed", result.stdout)
+
     def test_live_audit_reports_only_safe_latest_record_diagnosis(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:

@@ -20,7 +20,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "telegram-bot"))
 from booking_types import infer_extended_type
-from email_rules import classify_email_intent
+from email_rules import _strong_confirmation_subject, classify_email_intent
 from provider_rules import identify_email_provider
 from server import html_to_text, normalize_car_rental_fields, normalize_flight_fields
 
@@ -37,7 +37,7 @@ FACT_FIELDS = {
 ALLOWED_CATEGORIES = set(FACT_FIELDS) | {"unknown"}
 ALLOWED_INTENTS = {"booking", "cancellation", "change", "receipt", "notification", "other", "confirmed", "cancelled", "modified", "unknown"}
 ALLOWED_ERRORS = {"source_unavailable", "provider_unavailable", "invalid_provider_response", "unsupported_type", "unknown_status", "validation_failed", "persistence_failed", "no_unique_match", "not_travel_email", "no_source", ""}
-FAILURE_STAGES = {"received", "extracting", "classifying", "validating", "persisting", "persisted", "failed", "unknown"}
+FAILURE_STAGES = {"received", "extracting", "classifying", "validating", "matching", "persisting", "persisted", "failed", "unknown"}
 
 
 def _text(path: Path) -> str:
@@ -105,17 +105,18 @@ def _last_telemetry(record: dict) -> dict:
 
 def _failure_stage(record: dict, telemetry: dict, status: str) -> str:
     stage = str(record.get("processing_stage") or "").strip().lower()
-    if stage in FAILURE_STAGES:
-        return stage
     error = str(telemetry.get("validation_error_code") or "").strip().lower()
     inferred = {
         "source_unavailable": "extracting", "provider_unavailable": "extracting",
         "invalid_provider_response": "extracting", "not_travel_email": "classifying",
         "unsupported_type": "classifying", "unknown_status": "validating",
         "validation_failed": "validating", "persistence_failed": "persisting",
+        "no_unique_match": "matching",
     }.get(error)
     if inferred:
         return inferred
+    if stage in FAILURE_STAGES:
+        return stage
     return "persisted" if status == "processed" else "unknown"
 
 
@@ -202,6 +203,8 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
         category = category if category in ALLOWED_CATEGORIES else "unknown"
         intent = record.get("intent") or classify_email_intent(str(record.get("subject") or ""), source)
         intent = intent if intent in ALLOWED_INTENTS else "unknown"
+        source_intent = classify_email_intent(str(record.get("subject") or ""), source)
+        source_intent = source_intent if source_intent in ALLOWED_INTENTS else "unknown"
         field_presence = _facts(category, source, record)
         telemetry = _last_telemetry(record)
         validation, trip, persistence, stage, diagnosis = _outcomes(record, telemetry, field_presence)
@@ -218,6 +221,9 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
                 "provider": str(provider.get("provider") or "unknown"),
                 "category": str(category or "unknown"),
                 "intent": str(intent or "unknown"),
+                "source_intent": str(source_intent or "unknown"),
+                "source_intent_matches_record": source_intent == intent,
+                "strong_confirmation_subject": bool(_strong_confirmation_subject(str(record.get("subject") or ""))),
                 "status": status,
                 "stage": stage,
                 "diagnosis": diagnosis,
