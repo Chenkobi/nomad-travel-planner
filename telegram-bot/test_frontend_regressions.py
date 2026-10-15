@@ -7,6 +7,30 @@ INDEX = (ROOT / "index.html").read_text(encoding="utf-8")
 
 
 class FrontendRegressionTests(unittest.TestCase):
+    def test_trip_title_has_edit_action_and_custom_title_precedence(self):
+        self.assertIn('id="editTripTitle"', INDEX)
+        self.assertIn("if(t?.title_custom&&t?.title)return String(t.title)", INDEX)
+        self.assertIn("title_custom:true", INDEX)
+        server = (ROOT / "telegram-bot" / "server.py").read_text(encoding="utf-8")
+        self.assertIn('"title_custom"', server)
+
+    def test_share_button_is_in_a_non_overlapping_top_row(self):
+        self.assertIn('class="hero-top-row"', INDEX)
+        self.assertIn('.hero-share{position:static', INDEX)
+
+    def test_booking_rows_show_source_provider_and_open_document_preview(self):
+        self.assertIn("source_provider||x.supplier||x.source", INDEX)
+        self.assertIn('data-open-document="${esc(x.document)}"', INDEX)
+        self.assertIn("openDocumentPreview(button.dataset.openDocument)", INDEX)
+        server = (ROOT / "telegram-bot" / "server.py").read_text(encoding="utf-8")
+        self.assertIn('booking["source_provider"]', server)
+
+    def test_document_preview_loads_email_body_automatically_and_embeds_pdf(self):
+        self.assertIn("openDocumentSource(filename)", INDEX)
+        self.assertIn("content.insertAdjacentHTML('beforeend'", INDEX)
+        self.assertIn("/\\.pdf$/i.test(filename)", INDEX)
+        self.assertIn("data-open-document", INDEX)
+
     def test_share_is_icon_only_in_hero_not_metrics(self):
         self.assertIn('class="hero-share"', INDEX)
         self.assertIn('aria-label="שיתוף הטיול"', INDEX)

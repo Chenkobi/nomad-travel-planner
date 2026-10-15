@@ -1494,6 +1494,26 @@ def preserve_booking_metadata(trip, source, status="confirmed", source_email_id=
     return trip
 
 
+def hydrate_booking_sources(trips, email_records=None):
+    """Expose known provider labels for older bookings without returning email content."""
+    if email_records is None:
+        email_records = load_email_index()
+    providers = {
+        str(record.get("id") or ""): str(record.get("provider") or "").strip()
+        for record in email_records or []
+        if isinstance(record, dict) and record.get("id")
+    }
+    for trip in trips or []:
+        for group in ("hotels", "flights", "trains", "restaurants", "rentals", "attractions", "insurance"):
+            for booking in trip.get(group, []) or []:
+                if not isinstance(booking, dict) or booking.get("source_provider"):
+                    continue
+                provider = providers.get(str(booking.get("source_email_id") or ""), "")
+                if provider and provider.casefold() != "unknown":
+                    booking["source_provider"] = provider
+    return trips
+
+
 def decorate_trip_booking(trip, ai, filename, intake_id):
     kind = str(ai.get("type") or "").strip().lower()
     collection = {"hotel": "hotels", "flight": "flights", "train": "trains", "attraction": "attractions", "car_rental": "rentals", "restaurant": "restaurants"}.get(kind)
@@ -1507,6 +1527,10 @@ def decorate_trip_booking(trip, ai, filename, intake_id):
             value = str(ai.get(key) or "").strip()
             if value:
                 booking[key] = value; changed = True
+        source_provider = str(ai.get("_source_provider") or "").strip()
+        if source_provider and source_provider.casefold() != "unknown":
+            booking["source_provider"] = source_provider
+            changed = True
         booking["status"] = "confirmed"
         booking["source_email_id"] = intake_id
         booking.setdefault("lifecycle_history", []).append({"status": "confirmed", "email_id": intake_id, "at": datetime.now(timezone.utc).isoformat()})
@@ -1740,6 +1764,8 @@ def process_incoming_email(record):
         ai = gemini_extract(path, mime_type=mime_type, supplemental_text=supplemental_context) or {}
         if ai:
             ai = enrich_ai_with_provider(ai, provider_info)
+            if str(provider_info.get("provider") or "").strip().casefold() != "unknown":
+                ai["_source_provider"] = str(provider_info.get("provider") or "").strip()
             ai = guard_marketplace_category(ai, provider_info, "\n".join((body, attachment_context_for_provider)))
             # Keep extraction evidence behind one stable seam before validation/storage.
             booking_contract = normalize_booking_facts(
@@ -2673,7 +2699,7 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
                 self._json(502, {"error":"rates_unavailable"}); return
         if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
-        if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": load_trips()}); return
+        if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": hydrate_booking_sources(load_trips())}); return
         if path == "/api/push/vapid-public-key": self._json(200, {"public_key": vapid_public_key()}); return
         if path == "/api/notifications": self._json(200, {"notifications": load_notifications(), "unread": len(load_notifications())}); return
         if path == "/api/intake/email":
@@ -2948,6 +2974,8 @@ class Handler(BaseHTTPRequestHandler):
                 if str(trip.get("id")) == trip_id:
                     for key in ("hotel", "title", "start", "end", "days", "hotels", "flights", "trains", "attractions", "rentals"):
                         if key in payload: trip[key] = payload[key]
+                    if "title" in payload:
+                        trip["title_custom"] = bool(payload.get("title_custom", True))
                     save_trips(trips); self._json(200, {"trip": trip}); return
             self._json(404, {"error": "trip_not_found"})
         except (ValueError, TypeError, json.JSONDecodeError): self._json(400, {"error": "invalid_json"})

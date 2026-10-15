@@ -64,6 +64,23 @@ class EmailIntentTests(unittest.TestCase):
         self.assertEqual(trip["provider"], "trip.com")
         self.assertEqual(trip["confidence"], 0.99)
 
+    def test_decorate_booking_persists_detected_source_provider(self):
+        trip = {"hotels": [{"document": "email-1.txt", "name": "Example Hotel"}]}
+        changed = server.decorate_trip_booking(
+            trip,
+            {"type": "hotel", "_source_provider": "booking.com"},
+            "email-1.txt",
+            "message-1",
+        )
+        self.assertTrue(changed)
+        self.assertEqual(trip["hotels"][0]["source_provider"], "booking.com")
+
+    def test_trip_read_hydrates_legacy_provider_without_email_content(self):
+        trips = [{"hotels": [{"name": "Example", "source_email_id": "mail-1"}]}]
+        result = server.hydrate_booking_sources(trips, [{"id": "mail-1", "provider": "trip.com", "subject": "private"}])
+        self.assertEqual(result[0]["hotels"][0]["source_provider"], "trip.com")
+        self.assertNotIn("subject", result[0]["hotels"][0])
+
     def test_booking_confirmed_duca_daosta_hotel_is_not_restaurant(self):
         provider = {"provider": "booking.com"}
         result = server.guard_marketplace_category(

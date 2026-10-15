@@ -129,6 +129,26 @@ class AuditHarnessTests(unittest.TestCase):
             self.assertNotIn("Private Hotel", result.stdout)
             self.assertNotIn("Private City", result.stdout)
 
+    def test_live_audit_reports_only_safe_latest_record_diagnosis(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            intake = Path(tmp)
+            (intake / "index.json").write_text(json.dumps([
+                {"id": "private-old", "status": "processed", "received_at": "2026-10-10T00:00:00Z", "ingested_type": "hotel"},
+                {"id": "private-new", "status": "needs_review", "received_at": "2026-10-15T13:00:00Z", "subject": "Private subject", "from": "private@example.test", "ingested_type": "hotel", "processing_stage": "validating", "review_reason": "private raw reason", "attachments": [], "extraction_telemetry": [{"validation_error_code": "validation_failed"}]},
+            ]), encoding="utf-8")
+            result = subprocess.run([sys.executable, str(TOOL), str(intake)], cwd=ROOT, check=True, capture_output=True, text=True)
+            report = json.loads(result.stdout)
+            latest = report["latest_record_summary"]
+            self.assertEqual(latest["status"], "needs_review")
+            self.assertEqual(latest["category"], "hotel")
+            self.assertEqual(latest["stage"], "validating")
+            self.assertEqual(latest["failure_code"], "validation_failed")
+            self.assertNotIn("private-new", result.stdout)
+            self.assertNotIn("Private subject", result.stdout)
+            self.assertNotIn("private@example.test", result.stdout)
+            self.assertNotIn("private raw reason", result.stdout)
+
     def test_live_index_is_read_without_emitting_record_detail(self):
         with self.subTest("fixture index"):
             import tempfile

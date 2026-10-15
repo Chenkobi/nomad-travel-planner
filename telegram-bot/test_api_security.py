@@ -56,6 +56,19 @@ class ApiSecurityTests(unittest.TestCase):
     def test_email_intake_uses_its_dedicated_secret_boundary(self):
         self.assertFalse(server.api_requires_auth("/api/intake/email"))
 
+    def test_trip_title_patch_persists_custom_title_marker(self):
+        server.save_trips([{"id": "trip-title", "title": "Auto title", "start": "2026-10-01", "end": "2026-10-02"}])
+        request = urllib.request.Request(
+            self.base + "/api/trips/trip-title",
+            data=json.dumps({"title": "Family vacation", "title_custom": True}).encode(),
+            headers={"Authorization": "Bearer test-token", "Content-Type": "application/json"},
+            method="PATCH",
+        )
+        response = urllib.request.urlopen(request, timeout=3)
+        saved = json.loads(response.read())["trip"]
+        self.assertEqual(saved["title"], "Family vacation")
+        self.assertTrue(saved["title_custom"])
+
     def test_authorized_sensitive_read_is_allowed(self):
         response = self.request("/api/trips", {"Authorization": "Bearer test-token"})
         self.assertEqual(response.status, 200)

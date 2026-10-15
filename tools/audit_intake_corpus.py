@@ -189,7 +189,9 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
     facts = defaultdict(Counter)
     evidence = defaultdict(Counter)
     provider_outcomes = Counter()
-    for record in records:
+    latest_record_summary = None
+    latest_order = None
+    for index, record in enumerate(records):
         if record.get("_synthetic"):
             provider = {"provider": record["provider"], "category_hint": record["category"]}
             source = ""
@@ -208,6 +210,21 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
         reason_code = str(telemetry.get("validation_error_code") or "none").strip().lower()
         reason_code = reason_code if reason_code in ALLOWED_ERRORS else "other_error"
         provider_outcomes[f"{provider.get('provider', 'unknown')}|{category or 'unknown'}|{status}|{reason_code}"] += 1
+        received = str(record.get("received_at") or record.get("created_at") or record.get("timestamp") or "")
+        order = (bool(received), received, index)
+        if latest_order is None or order > latest_order:
+            latest_order = order
+            latest_record_summary = {
+                "provider": str(provider.get("provider") or "unknown"),
+                "category": str(category or "unknown"),
+                "intent": str(intent or "unknown"),
+                "status": status,
+                "stage": stage,
+                "diagnosis": diagnosis,
+                "failure_code": reason_code,
+                "failed_field": str(telemetry.get("validation_error_field") or "") if str(telemetry.get("validation_error_field") or "") in FACT_FIELDS.get(category, ()) else "",
+                "missing_fields": sorted(field for field, presence in field_presence.items() if presence == "missing"),
+            }
         for key, value in (("provider", provider.get("provider", "unknown")), ("category", category or "unknown"),
                            ("intent", intent or "unknown"), ("status", status), ("reason", reason_code),
                            ("validation", validation), ("trip", trip), ("persistence", persistence),
@@ -224,6 +241,7 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
         "schema_version": 1,
         "source_mode": source_mode,
         "records": len(records),
+        "latest_record_summary": latest_record_summary,
         "provider_counts": dict(sorted(counts["provider"].items())),
         "category_counts": dict(sorted(counts["category"].items())),
         "intent_counts": dict(sorted(counts["intent"].items())),
