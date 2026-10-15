@@ -3,6 +3,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-heb && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir pywebpush==2.1.2 webauthn==2.7.0
 COPY index.html /app/index.html
+COPY assets/rain-window.jpg /app/assets/rain-window.jpg
 COPY tripy-icon.png /app/tripy-icon.png
 COPY manifest.webmanifest /app/manifest.webmanifest
 COPY service-worker.js /app/service-worker.js
