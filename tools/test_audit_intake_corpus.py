@@ -197,6 +197,7 @@ class AuditHarnessTests(unittest.TestCase):
             self.assertEqual(summary["prior_policy_candidate_count"], 0)
             self.assertEqual(summary["seven_day_policy_candidate_count"], 1)
             self.assertEqual(summary["candidate_created_before_processing_count"], 1)
+            self.assertEqual(summary["saved_trip_count"], 2)
             self.assertNotIn("private-mail", result.stdout)
             self.assertNotIn("Private Hotel", result.stdout)
             self.assertNotIn("Italy", result.stdout)

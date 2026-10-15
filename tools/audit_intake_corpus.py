@@ -335,6 +335,7 @@ def _tripcom_window_diagnostic(record: dict, provider: str, category: str, statu
     if trips is None or not start or not end:
         return {"category": category, "status": status, "booking_visible": booking_visible,
                 "booking_saved": bool(booking), "booking_dates_present": bool(start and end),
+                "saved_trip_count": len(trips) if trips is not None else None,
                 "processing_time_present": bool(processing_time),
                 "prior_policy_candidate_count": None, "seven_day_policy_candidate_count": None,
                 "country_gate_excluded_candidate_count": None,
@@ -374,6 +375,7 @@ def _tripcom_window_diagnostic(record: dict, provider: str, category: str, statu
             old_count += 1
     return {"category": category, "status": status, "booking_visible": booking_visible,
             "booking_saved": bool(booking), "booking_dates_present": True,
+            "saved_trip_count": len(trips),
             "processing_time_present": bool(processing_time),
             "prior_policy_candidate_count": old_count,
             "seven_day_policy_candidate_count": new_count,

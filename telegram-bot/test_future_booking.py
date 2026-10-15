@@ -242,6 +242,79 @@ Drop-off location: Milan Airport Malpensa T1""", encoding="utf-8")
             finally:
                 server.DATA, server.TRIPS, server.UPLOADS = old_data, old_trips, old_uploads
 
+    def test_safe_tripcom_duplicate_shell_is_rehomed_to_unique_nearby_trip(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = (server.DATA, server.TRIPS, server.UPLOADS, server.EMAIL_DIR, server.EMAIL_INDEX)
+            try:
+                server.DATA = root / 'events.json'; server.TRIPS = root / 'trips.json'; server.UPLOADS = root / 'uploads'
+                server.EMAIL_DIR = root / 'email'; server.EMAIL_INDEX = server.EMAIL_DIR / 'index.json'
+                target = {
+                    'id': 'existing-trip', 'title': 'Custom Italy trip', 'title_custom': True,
+                    'start': '2026-12-11', 'end': '2026-12-12', 'days': 2,
+                    'documents': ['existing.txt'], 'document_titles': {'existing.txt': 'Existing booking'},
+                    'destinations': [{'city': 'Courmayeur', 'country': 'Italy'}],
+                    'hotels': [{'name': 'Existing stay', 'start': '2026-12-11', 'end': '2026-12-12', 'country': 'Italy', 'document': 'existing.txt'}],
+                    'flights': [], 'trains': [], 'attractions': [], 'rentals': [], 'restaurants': [],
+                }
+                booking = {'name': 'North Italy stay', 'start': '2026-12-10', 'end': '2026-12-13', 'country': 'Italy',
+                           'document': 'tripcom.txt', 'source_email_id': 'mail-1', 'source_provider': 'trip.com'}
+                source = {
+                    'id': 'generated-trip', 'title': 'North Italy', 'start': '2026-12-10', 'end': '2026-12-13', 'days': 4,
+                    'source': 'Email', 'document': 'tripcom.txt', 'documents': ['tripcom.txt'],
+                    'document_titles': {'tripcom.txt': 'Trip.com confirmation'},
+                    'destinations': [{'city': 'North Italy', 'country': 'Italy'}],
+                    'hotels': [booking], 'flights': [], 'trains': [], 'attractions': [], 'rentals': [], 'restaurants': [],
+                }
+                server.save_trips([target, source])
+                server.save_email_index([{'id': 'mail-1', 'provider': 'trip.com', 'status': 'processed',
+                                          'intent': 'confirmed', 'ingested_type': 'hotel', 'trip_id': 'generated-trip',
+                                          'document': 'tripcom.txt'}])
+                result = server.repair_tripcom_duplicate_shells()
+                saved = server.load_trips()
+                emails = server.load_email_index()
+                self.assertEqual(result['repaired'], 1)
+                self.assertEqual(len(saved), 1)
+                self.assertEqual(saved[0]['id'], 'existing-trip')
+                self.assertEqual(saved[0]['title'], 'Custom Italy trip')
+                self.assertEqual((saved[0]['start'], saved[0]['end']), ('2026-12-10', '2026-12-13'))
+                self.assertEqual(len(saved[0]['hotels']), 2)
+                self.assertIn('tripcom.txt', saved[0]['documents'])
+                self.assertEqual(emails[0]['trip_id'], 'existing-trip')
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS, server.EMAIL_DIR, server.EMAIL_INDEX = old
+
+    def test_tripcom_repair_leaves_non_pristine_shell_untouched(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = (server.DATA, server.TRIPS, server.UPLOADS, server.EMAIL_DIR, server.EMAIL_INDEX)
+            try:
+                server.DATA = root / 'events.json'; server.TRIPS = root / 'trips.json'; server.UPLOADS = root / 'uploads'
+                server.EMAIL_DIR = root / 'email'; server.EMAIL_INDEX = server.EMAIL_DIR / 'index.json'
+                target = {'id': 'existing-trip', 'start': '2026-12-11', 'end': '2026-12-12',
+                          'hotels': [{'name': 'Existing stay', 'start': '2026-12-11', 'end': '2026-12-12'}]}
+                source = {
+                    'id': 'generated-trip', 'title': 'North Italy', 'source': 'Email',
+                    'start': '2026-12-10', 'end': '2026-12-13', 'document': 'tripcom.txt',
+                    'documents': ['tripcom.txt'], 'document_titles': {'tripcom.txt': 'Confirmation'},
+                    'hotels': [
+                        {'name': 'Trip.com stay', 'start': '2026-12-10', 'end': '2026-12-13',
+                         'document': 'tripcom.txt', 'source_email_id': 'mail-1', 'source_provider': 'trip.com'},
+                        {'name': 'Extra stay', 'start': '2026-12-10', 'end': '2026-12-10', 'document': 'extra.txt'},
+                    ],
+                }
+                server.save_trips([target, source])
+                server.save_email_index([{'id': 'mail-1', 'provider': 'trip.com', 'status': 'processed',
+                                          'intent': 'confirmed', 'ingested_type': 'hotel', 'trip_id': 'generated-trip',
+                                          'document': 'tripcom.txt'}])
+                result = server.repair_tripcom_duplicate_shells()
+                self.assertEqual(result['repaired'], 0)
+                self.assertEqual(result['skipped_not_safe'], 1)
+                self.assertEqual(len(server.load_trips()), 2)
+                self.assertEqual(server.load_email_index()[0]['trip_id'], 'generated-trip')
+            finally:
+                server.DATA, server.TRIPS, server.UPLOADS, server.EMAIL_DIR, server.EMAIL_INDEX = old
+
     def test_dated_trip_target_matches_seven_day_margin_and_ignores_country(self):
         trip = {'id': 'existing-trip', 'start': '2026-12-11', 'end': '2026-12-12', 'destinations': [{'country': 'Georgia'}], 'hotels': [{'start': '2026-12-11', 'end': '2026-12-12'}]}
         self.assertIs(server.dated_trip_target([trip], '2026-12-04', '2026-12-04'), trip)

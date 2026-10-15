@@ -8,6 +8,11 @@ on:
         required: false
         type: boolean
         default: false
+      repair_tripcom_duplicates:
+        description: "Rehome only verified Trip.com bookings in pristine duplicate trip shells"
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -105,6 +110,20 @@ jobs:
 
           curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8787/healthz
           printf '\nDeployment verified: %s\n' "$RELEASE_TAG"
+
+      - name: Verify live date display markup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8787/ | python3 -c 'import sys; html=sys.stdin.read(); assert "function formatDisplayDate(value)" in html; assert "function formatDateText(value)" in html; assert "<bdi dir=\"ltr\">" in html; print("live_date_format: dd/mm/yyyy; ltr_date_ranges: verified")'
+
+      - name: Rehome verified Trip.com duplicate shells (explicit dispatch only)
+        if: github.event_name == 'workflow_dispatch' && inputs.repair_tripcom_duplicates == true
+        run: |
+          set -Eeuo pipefail
+          result="$(docker exec "$CONTAINER_NAME" python3 -c 'import sys,json; sys.path.insert(0, "/app/telegram-bot"); import server; print(json.dumps(server.repair_tripcom_duplicate_shells(), ensure_ascii=False, sort_keys=True))')"
+          printf '%s\n' "$result"
+          python3 -c 'import json,sys; r=json.loads(sys.argv[1]); assert r["readback_verified"]; assert r["trip_count_after"] == r["trip_count_before"] - r["repaired"]' "$result"
 
       - name: Verify latest email state after recovery (aggregate only)
         run: docker exec "$CONTAINER_NAME" python3 /app/tools/audit_intake_corpus.py /app/email --latest-only --wait-terminal 90 --trip-data-file /app/data/trips.json

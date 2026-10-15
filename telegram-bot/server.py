@@ -1603,6 +1603,177 @@ def hotel_trip_target(trips, start, end, country=""):
     return dated_trip_target(trips, start, end, proximity_days=7)
 
 
+def _booking_interval_for_type(ingested_type, booking):
+    facts = lifecycle_facts(booking)
+    start_value = str(facts.get("start") or "").strip()
+    end_value = str(facts.get("end") or start_value).strip()
+    start = normalize_date_value(start_value) or start_value
+    end = normalize_date_value(end_value) or end_value
+    try:
+        start = datetime.fromisoformat(start).date().isoformat()
+        end = datetime.fromisoformat(end).date().isoformat()
+    except (TypeError, ValueError):
+        return None, None
+    return (start, end) if end >= start else (None, None)
+
+
+def _trip_booking_entries(trip):
+    entries = []
+    for collection in ("hotels", "flights", "trains", "attractions", "rentals", "restaurants"):
+        values = trip.get(collection) or []
+        if isinstance(values, dict):
+            values = [values]
+        entries.extend((collection, item) for item in values if isinstance(item, dict))
+    insurance = trip.get("insurance")
+    if isinstance(insurance, dict) and insurance:
+        entries.append(("insurance", insurance))
+    return entries
+
+
+def _safe_generated_booking_shell(trip, collection, booking, document, email_id):
+    if trip.get("title_custom") or trip.get("closed") or trip.get("archived"):
+        return False
+    if str(trip.get("source") or "").casefold() != "email":
+        return False
+    if not document or str(trip.get("document") or "") != document:
+        return False
+    if list(trip.get("documents") or []) != [document]:
+        return False
+    titles = trip.get("document_titles") or {}
+    if not isinstance(titles, dict) or set(titles.keys()) - {document}:
+        return False
+    entries = _trip_booking_entries(trip)
+    if len(entries) != 1 or entries[0][0] != collection or entries[0][1] is not booking:
+        return False
+    if str(booking.get("document") or "") != document or str(booking.get("source_email_id") or "") != email_id:
+        return False
+    allowed = {
+        "id", "title", "title_custom", "start", "end", "days", "source", "document", "documents",
+        "image", "images", "destinations", "document_titles", "hotels", "flights", "trains",
+        "attractions", "rentals", "restaurants", "insurance", "hotel", "checkin_time",
+        "checkout_time", "city", "country", "address", "check_in_time", "check_out_time",
+    }
+    return not any(key not in allowed and value not in (None, "", [], {}) for key, value in trip.items())
+
+
+def repair_tripcom_duplicate_shells():
+    """Move only source-linked Trip.com bookings out of pristine nearby generated shells."""
+    collections = {"hotel": "hotels", "flight": "flights", "train": "trains", "attraction": "attractions",
+                   "car_rental": "rentals", "restaurant": "restaurants", "insurance": "insurance"}
+    result = {"scanned_tripcom_shells": 0, "repaired": 0, "skipped_not_safe": 0,
+              "skipped_no_candidate": 0, "skipped_ambiguous": 0, "skipped_missing_source": 0,
+              "trip_count_before": 0, "trip_count_after": 0, "readback_verified": False}
+    with LOCK:
+        trips = load_trips()
+        email_records = load_email_index()
+        result["trip_count_before"] = len(trips)
+        original_trips = json.loads(json.dumps(trips))
+        original_email_records = json.loads(json.dumps(email_records))
+        records_by_id = {str(record.get("id") or ""): record for record in email_records if isinstance(record, dict)}
+        changed = False
+        moved_records = []
+        for source_trip in list(trips):
+            if not isinstance(source_trip, dict):
+                continue
+            entries = _trip_booking_entries(source_trip)
+            tripcom_entries = [(collection, booking) for collection, booking in entries
+                               if str(booking.get("source_provider") or "").strip().casefold() == "trip.com"]
+            if not tripcom_entries:
+                continue
+            result["scanned_tripcom_shells"] += 1
+            if len(entries) != 1 or len(tripcom_entries) != 1:
+                result["skipped_not_safe"] += 1
+                continue
+            collection, booking = tripcom_entries[0]
+            email_id = str(booking.get("source_email_id") or "").strip()
+            document = str(booking.get("document") or "").strip()
+            record = records_by_id.get(email_id)
+            if not record or str(record.get("status") or "").casefold() != "processed" or str(record.get("trip_id") or "") != str(source_trip.get("id") or ""):
+                result["skipped_missing_source"] += 1
+                continue
+            if str(record.get("provider") or "").strip().casefold() != "trip.com" and str(record.get("source_provider") or "").strip().casefold() != "trip.com":
+                result["skipped_missing_source"] += 1
+                continue
+            ingested_type = str(record.get("ingested_type") or "").strip().casefold()
+            if collections.get(ingested_type) != collection or str(record.get("document") or "") != document:
+                result["skipped_missing_source"] += 1
+                continue
+            if not _safe_generated_booking_shell(source_trip, collection, booking, document, email_id):
+                result["skipped_not_safe"] += 1
+                continue
+            start, end = _booking_interval_for_type(ingested_type, booking)
+            if not start or not end:
+                result["skipped_not_safe"] += 1
+                continue
+            other_trips = [trip for trip in trips if isinstance(trip, dict)
+                           and str(trip.get("id") or "") != str(source_trip.get("id") or "")
+                           and _trip_booking_entries(trip)]
+            try:
+                target = dated_trip_target(other_trips, start, end, proximity_days=7)
+            except ValueError:
+                result["skipped_ambiguous"] += 1
+                continue
+            if not target:
+                result["skipped_no_candidate"] += 1
+                continue
+            target_collection = target.setdefault(collection, [])
+            if isinstance(target_collection, dict):
+                target_collection = [target_collection]
+            if not any(str(item.get("source_email_id") or "") == email_id or str(item.get("document") or "") == document for item in target_collection if isinstance(item, dict)):
+                target_collection.append(booking)
+            target[collection] = target_collection
+            extend_trip_window(target, start, end)
+            target_docs = target.get("documents") or []
+            if not isinstance(target_docs, list):
+                target_docs = [target_docs] if isinstance(target_docs, str) and target_docs else []
+            target["documents"] = list(dict.fromkeys(target_docs + [document]))
+            target_titles = target.get("document_titles")
+            if not isinstance(target_titles, dict):
+                target_titles = {}
+            source_titles = source_trip.get("document_titles")
+            source_title = source_titles.get(document) if isinstance(source_titles, dict) else None
+            target_titles[document] = source_title or "אישור הזמנה"
+            target["document_titles"] = target_titles
+            source_destinations = source_trip.get("destinations") or []
+            combined_destinations = list(target.get("destinations") or []) + [item for item in source_destinations if isinstance(item, dict)]
+            unique_destinations = {(item.get("city"), item.get("country")): item for item in combined_destinations}
+            target["destinations"] = list(unique_destinations.values())
+            record["trip_id"] = target.get("id")
+            trips.remove(source_trip)
+            moved_records.append((email_id, str(target.get("id") or ""), document, collection))
+            result["repaired"] += 1
+            changed = True
+        if changed:
+            try:
+                save_trips(trips)
+                save_email_index(email_records)
+                saved_trips = load_trips()
+                saved_email_records = load_email_index()
+                for email_id, target_id, document, collection in moved_records:
+                    saved_record = next((item for item in saved_email_records if str(item.get("id") or "") == email_id), None)
+                    saved_trip = next((item for item in saved_trips if str(item.get("id") or "") == target_id), None)
+                    bookings = (saved_trip or {}).get(collection) or []
+                    if isinstance(bookings, dict):
+                        bookings = [bookings]
+                    visible = any(isinstance(item, dict) and (
+                        str(item.get("source_email_id") or "") == email_id or str(item.get("document") or "") == document
+                    ) for item in bookings)
+                    if not saved_record or str(saved_record.get("trip_id") or "") != target_id or not visible:
+                        raise RuntimeError("Trip.com reassignment read-back failed")
+                if len(saved_trips) != result["trip_count_before"] - result["repaired"]:
+                    raise RuntimeError("Trip.com shell removal read-back failed")
+                result["trip_count_after"] = len(saved_trips)
+                result["readback_verified"] = True
+            except Exception:
+                save_trips(original_trips)
+                save_email_index(original_email_records)
+                raise
+        else:
+            result["trip_count_after"] = len(trips)
+            result["readback_verified"] = True
+    return result
+
+
 CITY_DISPLAY_NAMES = {
     "milan": "מילאנו",
     "rome": "רומא",
