@@ -44,6 +44,10 @@ class EmailIntentTests(unittest.TestCase):
         text = """Booking.com reservation confirmation\nProperty: Batumi Hotel\nCheck-in: Tue, 20 Oct 2026\nCheck-out: Thu, 22 Oct 2026\nRoom: Double room"""
         self.assertEqual(infer_extended_type({}, text), "hotel")
 
+    def test_booking_lodging_fields_override_false_restaurant_type(self):
+        text = """Booking.com reservation confirmation\nProperty: Batumi Hotel\nCheck-in: Tue, 20 Oct 2026\nCheck-out: Thu, 22 Oct 2026\nRoom: Double room\nRestaurant recommendations"""
+        self.assertEqual(server.infer_document_type({"type": "restaurant"}, text), "hotel")
+
     def test_provider_identity_detects_sixt_and_car_rental(self):
         result = identify_email_provider(
             sender="noreply@sixt.com",

@@ -1802,7 +1802,12 @@ def resume_pending_email_processing():
             and str(record.get("provider") or "").casefold() in {"wizz_air", "sixt"}
             and str(record.get("intent") or "").casefold() in {"modified", "cancelled"}
         )
-        retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors) or recent_lifecycle_retry
+        booking_restaurant_recovery = (
+            status == "needs_review"
+            and str(record.get("provider") or "").casefold() == "booking.com"
+            and reason == "ValueError: restaurant reservation missing name, date, or time"
+        )
+        retryable = status in {"received", "processing"} or (status == "needs_review" and reason in retryable_errors) or recent_lifecycle_retry or booking_restaurant_recovery
         if retryable:
             if recent_lifecycle_retry:
                 update_email_record(intake_id=record.get("id"), lifecycle_recovery_attempted=True)
@@ -1937,6 +1942,11 @@ def infer_document_type(ai, text="", context=""):
     restaurant_markers = ("restaurant", "dinner", "lunch", "table reservation", "מסעדה", "הזמנת שולחן")
     hotel_score = sum(1 for marker in hotel_markers if marker in combined)
     restaurant_score = sum(1 for marker in restaurant_markers if marker in combined)
+    booking_lodging_labels = ("property:", "check-in:", "check-out:", "room:", "accommodation:")
+    lodging_label_count = sum(label in combined for label in booking_lodging_labels)
+    restaurant_fact_markers = ("table reservation", "restaurant name", "dining reservation", "party size", "reservation time")
+    if doc_type == "restaurant" and lodging_label_count >= 2 and not any(marker in combined for marker in restaurant_fact_markers):
+        return "hotel"
     if doc_type == "restaurant" and hotel_score >= 2 and restaurant_score == 0:
         return "hotel"
     extended = infer_extended_type(ai, combined)
