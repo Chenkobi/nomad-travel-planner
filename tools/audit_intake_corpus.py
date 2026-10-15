@@ -1,201 +1,209 @@
 #!/usr/bin/env python3
-"""Redacted local audit of captured intake records.
+"""Privacy-safe aggregate audit for persisted TRIPY email intake records.
 
-This tool intentionally prints aggregate counts and short record suffixes only.
-It is for local QA; raw intake data must never be committed.
+The tool reads local intake artifacts but emits counts and allow-listed labels only.
+It never emits message IDs, subjects, addresses, filenames, extracted values, or
+record samples. ``--synthetic`` is deterministic and is used when no index exists.
 """
 from __future__ import annotations
 
 import argparse
 import json
-from collections import Counter
+import re
+from collections import Counter, defaultdict
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
-import re
-import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "telegram-bot"))
-from email_rules import classify_email_intent
 from booking_types import infer_extended_type
+from email_rules import classify_email_intent
 from provider_rules import identify_email_provider
-from server import _explicit_date_tokens, _label_values, html_to_text, normalize_flight_fields, normalize_car_rental_fields
+from server import html_to_text, normalize_car_rental_fields, normalize_flight_fields
 
 
-def read_text(path: Path) -> str:
+FACT_FIELDS = {
+    "flight": ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_time"),
+    "hotel": ("hotel", "city", "check_in", "check_out"),
+    "car_rental": ("pickup_date", "pickup_time", "pickup_location", "vehicle_type"),
+    "train": ("train_number", "origin", "destination", "date", "time"),
+    "attraction": ("attraction", "date", "time", "location"),
+    "restaurant": ("restaurant_name", "date", "time"),
+    "insurance": ("policy_number", "insurer", "valid_from", "valid_to"),
+}
+
+
+def _text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
 
 
-def read_headers(path: Path) -> dict[str, list[str]]:
+def _headers(path: Path) -> dict[str, str]:
     try:
         with path.open("rb") as handle:
             message = BytesParser(policy=policy.default).parse(handle)
-        return {
-            "received": [str(value) for value in message.get_all("Received", [])],
-            "from": [str(value) for value in message.get_all("From", [])],
-            "reply_to": [str(value) for value in message.get_all("Reply-To", [])],
-        }
+        return {key: "\n".join(str(value) for value in message.get_all(key.title(), []))
+                for key in ("received", "from", "reply_to")}
     except (OSError, ValueError):
-        return {"received": [], "from": [], "reply_to": []}
+        return {"received": "", "from": "", "reply_to": ""}
 
 
-def redacted_line_shapes(text: str) -> list[str]:
-    shapes = []
-    for line in str(text or "").splitlines():
-        clean = re.sub(r"\s+", " ", line).strip()
-        if not clean or len(clean) > 180:
-            continue
-        if re.search(r"[:：]", clean):
-            label = re.split(r"[:：]", clean, maxsplit=1)[0].strip().casefold()
-            label = re.sub(r"[^a-z0-9א-ת _/-]", "", label)[:80]
-            if label and label not in shapes:
-                shapes.append(label)
-        elif re.search(r"\b(?:20\\d{2}|[A-Z]{2,3}\\s?\\d{1,4}|(?:[01]?\\d|2[0-3]):[0-5]\\d)\b", clean, re.I):
-            shapes.append("unlabelled_structured_line")
-    return shapes[:40]
+def _body_for_record(intake_dir: Path, record: dict) -> str:
+    folder = intake_dir / str(record.get("id") or "")
+    parts = [_text(folder / "body.txt"), html_to_text(_text(folder / "body.html"))]
+    source_file = str(record.get("source_file") or "source.eml")
+    parts.append("\n".join(_headers(folder / source_file).values()))
+    # Names are used only as classification signals; their values never leave this process.
+    parts.append(" ".join(str(item.get("filename") or "") for item in record.get("attachments") or []))
+    return "\n".join(parts)
+
+
+def _category(record: dict, provider: dict, source: str) -> str:
+    hint = str(provider.get("category_hint") or "")
+    if hint and hint != "marketplace":
+        return hint
+    return infer_extended_type({}, source) or str(record.get("ingested_type") or "unknown") or "unknown"
+
+
+def _facts(category: str, source: str, record: dict) -> dict[str, str]:
+    explicit = record.get("facts_present")
+    if isinstance(explicit, dict):
+        return {field: "present" if bool(explicit.get(field)) else "missing" for field in FACT_FIELDS.get(category, ())}
+    probe = {}
+    if category == "flight":
+        probe = normalize_flight_fields({}, source)
+    elif category == "car_rental":
+        probe = normalize_car_rental_fields({}, source)
+    return {field: "present" if str(probe.get(field) or "").strip() else "missing"
+            for field in FACT_FIELDS.get(category, ())}
+
+
+def _last_telemetry(record: dict) -> dict:
+    history = record.get("extraction_telemetry") or []
+    return history[-1] if history and isinstance(history[-1], dict) else {}
+
+
+def _outcomes(record: dict, telemetry: dict, facts: dict[str, str]) -> tuple[str, str, str, str, str]:
+    status = str(record.get("status") or "unknown")
+    error = str(telemetry.get("validation_error_code") or "")
+    persistence = str(telemetry.get("persistence_outcome") or "") or ({"processed": "created"}.get(status, "not_persisted"))
+    validation = "passed" if not error and status == "processed" else (error or "unknown")
+    trip_id = bool(str(record.get("trip_id") or "").strip())
+    if trip_id:
+        trip_match = "matched"
+    elif status == "processed":
+        trip_match = "processed_but_not_visible"
+    elif status in {"needs_review", "failed"}:
+        trip_match = "not_matched"
+    else:
+        trip_match = "unknown"
+    stage = str(record.get("processing_stage") or "unknown")
+    missing = any(value == "missing" for value in facts.values())
+    if missing and status != "processed" and not error:
+        diagnosis = "unknown_facts"
+    elif trip_match == "processed_but_not_visible":
+        diagnosis = "processed_but_not_visible"
+    elif error in {"persistence_failed", "validation_failed"} or persistence == "failed":
+        diagnosis = "bug_or_invariant_failure"
+    elif error:
+        diagnosis = "known_failure"
+    elif status == "processed":
+        diagnosis = "success"
+    else:
+        diagnosis = "unknown_state"
+    return validation, trip_match, persistence, stage, diagnosis
+
+
+def _synthetic_records(count: int) -> list[dict]:
+    templates = [
+        ("booking.com", "hotel", "confirmed", "persisted", True, "created"),
+        ("wizz_air", "flight", "confirmed", "persisted", True, "created"),
+        ("sixt", "car_rental", "confirmed", "persisted", True, "created"),
+        ("deutsche_bahn", "train", "confirmed", "persisted", True, "created"),
+        ("marriott", "hotel", "cancelled", "applying", False, "not_persisted"),
+        ("unknown", "flight", "confirmed", "applying", False, "not_persisted"),
+        ("avis", "car_rental", "confirmed", "failed", False, "failed"),
+        ("harel", "insurance", "confirmed", "persisted", True, "updated"),
+        ("trip.com", "attraction", "confirmed", "persisted", False, "created"),
+        ("unknown", "hotel", "confirmed", "persisted", False, "created"),
+    ]
+    records = []
+    for index in range(count):
+        provider, category, intent, stage, visible, persistence = templates[index % len(templates)]
+        fields = {field: True for field in FACT_FIELDS.get(category, ())}
+        if index % len(templates) == 5:
+            fields["departure_time"] = False
+        if index % len(templates) == 9:
+            fields["check_out"] = False
+        error = ""
+        if stage == "extracting": error = "provider_unavailable"
+        if stage == "failed": error = "persistence_failed"
+        records.append({"_synthetic": True, "provider": provider, "category": category, "intent": intent,
+                        "status": "processed" if stage == "persisted" else "needs_review",
+                        "processing_stage": stage, "trip_id": f"synthetic-trip-{index}" if visible else "",
+                        "facts_present": fields, "extraction_telemetry": [{"validation_error_code": error,
+                        "persistence_outcome": persistence}]})
+    return records
+
+
+def build_report(records: list[dict], source_mode: str, intake_dir: Path | None = None) -> dict:
+    counts = {key: Counter() for key in ("provider", "category", "intent", "validation", "trip", "persistence", "stage", "diagnosis")}
+    facts = defaultdict(Counter)
+    for record in records:
+        if record.get("_synthetic"):
+            provider = {"provider": record["provider"], "category_hint": record["category"]}
+            source = ""
+        else:
+            source = _body_for_record(intake_dir or ROOT, record)
+            provider = identify_email_provider(str(record.get("from") or ""), str(record.get("reply_to") or ""), str(record.get("subject") or ""), source)
+        category = record.get("category") or _category(record, provider, source)
+        intent = record.get("intent") or classify_email_intent(str(record.get("subject") or ""), source)
+        field_presence = _facts(category, source, record)
+        telemetry = _last_telemetry(record)
+        validation, trip, persistence, stage, diagnosis = _outcomes(record, telemetry, field_presence)
+        for key, value in (("provider", provider.get("provider", "unknown")), ("category", category or "unknown"),
+                           ("intent", intent or "unknown"), ("validation", validation), ("trip", trip),
+                           ("persistence", persistence), ("stage", stage), ("diagnosis", diagnosis)):
+            counts[key][str(value)] += 1
+        for field, value in field_presence.items():
+            facts[f"{category}.{field}"][value] += 1
+    return {
+        "schema_version": 1,
+        "source_mode": source_mode,
+        "records": len(records),
+        "provider_counts": dict(sorted(counts["provider"].items())),
+        "category_counts": dict(sorted(counts["category"].items())),
+        "intent_counts": dict(sorted(counts["intent"].items())),
+        "fact_presence": {key: dict(sorted(value.items())) for key, value in sorted(facts.items())},
+        "validation_result_counts": dict(sorted(counts["validation"].items())),
+        "trip_match_result_counts": dict(sorted(counts["trip"].items())),
+        "persistence_result_counts": dict(sorted(counts["persistence"].items())),
+        "failure_stage_counts": dict(sorted(counts["stage"].items())),
+        "diagnosis_counts": dict(sorted(counts["diagnosis"].items())),
+    }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("intake_dir", type=Path)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("intake_dir", nargs="?", type=Path, default=ROOT / "trip-email")
+    parser.add_argument("--synthetic", action="store_true")
+    parser.add_argument("--count", type=int, default=60)
     args = parser.parse_args()
-    index_path = args.intake_dir / "index.json"
-    records = json.loads(index_path.read_text(encoding="utf-8"))
-    provider_counts = Counter()
-    category_counts = Counter()
-    intent_counts = Counter()
-    unresolved_reason_counts = Counter()
-    unresolved_attachment_counts = Counter()
-    persisted_review_reason_counts = Counter()
-    arkia_samples = []
-    unresolved = []
-    recent = []
-
-    for record in records:
-        folder = args.intake_dir / str(record["id"])
-        body = read_text(folder / "body.txt")
-        html = read_text(folder / "body.html")
-        headers = read_headers(folder / str(record.get("source_file") or "source.eml"))
-        attachment_names = " ".join(str(item.get("filename") or "") for item in record.get("attachments") or [])
-        attachment_text = []
-        for item in record.get("attachments") or []:
-            suffix = Path(str(item.get("filename") or "")).suffix.lower()
-            if item.get("content_type") == "text/html" or suffix in {".html", ".htm"}:
-                attachment_text.append(html_to_text(read_text(folder / str(item.get("path") or ""))))
-            elif suffix == ".pdf":
-                try:
-                    result = subprocess.run(
-                        ["pdftotext", str(folder / str(item.get("path") or "")), "-"],
-                        capture_output=True, text=True, timeout=20,
-                    )
-                    if result.returncode == 0:
-                        attachment_text.append(result.stdout)
-                except (OSError, subprocess.SubprocessError):
-                    pass
-        clean_html = html_to_text(html)
-        source_text = "\n".join((
-            body,
-            clean_html,
-            attachment_names,
-            *attachment_text,
-            *headers["received"],
-            *headers["from"],
-            *headers["reply_to"],
-        ))
-        provider = identify_email_provider(
-            sender=str(record.get("from") or ""),
-            reply_to=str(record.get("reply_to") or ""),
-            subject=str(record.get("subject") or ""),
-            body=source_text,
-        )
-        if provider["provider"] == "arkia" and len(arkia_samples) < 8:
-            probe = normalize_flight_fields({}, source_text)
-            arkia_samples.append({
-                "id_suffix": str(record.get("id") or "")[-8:],
-                "status": str(record.get("status") or ""),
-                "subject_shape": re.sub(r"\\d+", "#", str(record.get("subject") or ""))[:120],
-                "source_text_length": len(source_text),
-                "attachment_extensions": sorted({Path(str(item.get("filename") or "")).suffix.lower() for item in record.get("attachments") or []}),
-                "line_shapes": redacted_line_shapes(source_text),
-                "normalized_fields_present": sorted(key for key in ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_date", "arrival_time") if str(probe.get(key) or "").strip()),
-                "stored_reason": str(record.get("review_reason") or "")[:100],
-            })
-        provider_counts[provider["provider"]] += 1
-        category = provider["category_hint"] if provider["category_hint"] != "marketplace" else None
-        category = category or infer_extended_type({}, source_text) or "unknown"
-        category_counts[category] += 1
-        intent = classify_email_intent(
-            str(record.get("subject") or ""),
-            "\n".join((body, html, *attachment_text, *headers["received"], *headers["from"])),
-        )
-        intent_counts[intent] += 1
-        if len(recent) < 8:
-            telemetry = (record.get("extraction_telemetry") or [{}])[-1] or {}
-            parser_probe = normalize_flight_fields({}, source_text) if category == "flight" else normalize_car_rental_fields({}, source_text) if category == "car_rental" else {}
-            required_fields = {
-                "flight": ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_time"),
-                "car_rental": ("pickup_date", "pickup_time", "pickup_location", "vehicle_type"),
-            }.get(category, ())
-            recent.append({
-                "id_suffix": str(record.get("id") or "")[-8:],
-                "received_at": str(record.get("received_at") or ""),
-                "provider": provider["provider"],
-                "category": category,
-                "intent": intent,
-                "status": str(record.get("status") or ""),
-                "stage": str(record.get("processing_stage") or ""),
-                "missing_deterministic_fields": [key for key in required_fields if not str(parser_probe.get(key) or "").strip()],
-                "source_text_length": len(source_text),
-                "signal_counts": {
-                    "flight_codes": len(re.findall(r"(?<![A-Z0-9])[A-Z]{2,3}\\s?\\d{1,4}(?!\\d)", source_text, re.I)),
-                    "times": len(re.findall(r"\\b(?:[01]?\\d|2[0-3]):[0-5]\\d\\b", source_text)),
-                    "dates": len(_explicit_date_tokens(source_text)),
-                    "route_labels": sum(len(_label_values(source_text, labels)) for labels in (("from", "origin", "departure airport"), ("to", "destination", "arrival airport"), ("departure date", "date"))),
-                },
-                "line_shapes": redacted_line_shapes(source_text) if provider["provider"] == "booking.com" else [],
-                "attachment_extensions": sorted({Path(str(item.get("filename") or "")).suffix.lower() for item in record.get("attachments") or []}),
-                "review_reason": str(record.get("review_reason") or "")[:120],
-                "processing_error": str(record.get("processing_error") or "")[:120],
-                "telemetry_error": str(telemetry.get("validation_error_code") or ""),
-            })
-        reasons = []
-        if provider["provider"] == "unknown":
-            reasons.append("provider_unknown")
-        if category == "unknown":
-            reasons.append("category_unknown")
-        if intent == "unknown":
-            reasons.append("intent_unknown")
-        unresolved_reason_counts.update(reasons)
-        if reasons:
-            formats = tuple(sorted(
-                Path(str(item.get("filename") or "")).suffix.lower()
-                or str(item.get("content_type") or "unknown")
-                for item in record.get("attachments") or []
-            )) or ("none",)
-            unresolved_attachment_counts.update(formats)
-            persisted_reason = str(record.get("review_reason") or "").split(":", 1)[0].strip()
-            if persisted_reason:
-                persisted_review_reason_counts[persisted_reason] += 1
-            unresolved.append({"id_suffix": str(record["id"])[-8:], "provider": provider["provider"], "category": category, "intent": intent})
-
-    print(json.dumps({
-        "records": len(records),
-        "provider_counts": dict(provider_counts),
-        "category_counts": dict(category_counts),
-        "intent_counts": dict(intent_counts),
-        "unresolved_reason_counts": dict(unresolved_reason_counts),
-        "unresolved_attachment_counts": dict(unresolved_attachment_counts),
-        "persisted_review_reason_counts": dict(persisted_review_reason_counts),
-        "recent": recent,
-        "arkia_samples": arkia_samples,
-        "unresolved_count": len(unresolved),
-        "unresolved": unresolved,
-    }, ensure_ascii=False, indent=2, sort_keys=True))
+    index = args.intake_dir / "index.json"
+    use_synthetic = args.synthetic or not index.is_file()
+    if use_synthetic:
+        records, mode = _synthetic_records(max(1, args.count)), "synthetic"
+    else:
+        try:
+            raw = json.loads(index.read_text(encoding="utf-8"))
+            records, mode = (raw if isinstance(raw, list) else raw.get("records", [])), "live"
+        except (OSError, ValueError, AttributeError):
+            records, mode = _synthetic_records(max(1, args.count)), "synthetic_fallback"
+    print(json.dumps(build_report(records, mode, args.intake_dir), ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 
