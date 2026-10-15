@@ -86,6 +86,32 @@ class AuditHarnessTests(unittest.TestCase):
             self.assertNotIn("Private Hotel", result.stdout)
             self.assertNotIn("private-record", result.stdout)
 
+    def test_latest_only_can_verify_booking_is_in_the_trip_without_emitting_ids(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            intake = root / "email"
+            intake.mkdir()
+            (intake / "index.json").write_text(json.dumps([{
+                "id": "private-mail", "status": "processed", "intent": "confirmed", "ingested_type": "hotel",
+                "trip_id": "private-trip", "document": "private-document.txt",
+                "extraction_telemetry": [{"persistence_outcome": "created"}],
+            }]), encoding="utf-8")
+            trips_path = root / "trips.json"
+            trips_path.write_text(json.dumps([{
+                "id": "private-trip", "hotels": [{"source_email_id": "private-mail", "document": "private-document.txt", "name": "Private Hotel"}]
+            }]), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(TOOL), str(intake), "--latest-only", "--trip-data-file", str(trips_path)],
+                cwd=ROOT, check=True, capture_output=True, text=True,
+            )
+            summary = json.loads(result.stdout)
+            self.assertTrue(summary["booking_visible"])
+            self.assertEqual(summary["trip_match"], "matched_visible")
+            self.assertTrue(summary["trip_id_resolves"])
+            self.assertNotIn("private-mail", result.stdout)
+            self.assertNotIn("Private Hotel", result.stdout)
+
     def test_latest_only_cli_emits_safe_summary_without_corpus_details(self):
         result = subprocess.run(
             [sys.executable, str(TOOL), "--synthetic", "--count", "5", "--latest-only"],

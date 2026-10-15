@@ -107,7 +107,7 @@ jobs:
           printf '\nDeployment verified: %s\n' "$RELEASE_TAG"
 
       - name: Verify latest email state after recovery (aggregate only)
-        run: docker exec "$CONTAINER_NAME" python3 /app/tools/audit_intake_corpus.py /app/email --latest-only --wait-terminal 90
+        run: docker exec "$CONTAINER_NAME" python3 /app/tools/audit_intake_corpus.py /app/email --latest-only --wait-terminal 90 --trip-data-file /app/data/trip-data.json
 
       - name: Permanently clear intake mailbox (explicit dispatch only)
         if: github.event_name == 'workflow_dispatch' && inputs.clear_intake == true

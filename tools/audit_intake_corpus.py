@@ -186,7 +186,47 @@ def _synthetic_records(count: int) -> list[dict]:
     return records
 
 
-def build_report(records: list[dict], source_mode: str, intake_dir: Path | None = None) -> dict:
+def _booking_visibility(record: dict, trips: list[dict] | None) -> tuple[bool | None, bool | None]:
+    if trips is None:
+        return None, None
+    trip_id = str(record.get("trip_id") or "").strip()
+    email_id = str(record.get("id") or "").strip()
+    document = str(record.get("document") or "").strip()
+    trip = next((item for item in trips if isinstance(item, dict) and str(item.get("id") or "") == trip_id), None) if trip_id else None
+    if not trip:
+        return False, False
+    collection = {
+        "flight": "flights", "hotel": "hotels", "train": "trains", "car_rental": "rentals",
+        "restaurant": "restaurants", "attraction": "attractions", "insurance": "insurance",
+    }.get(str(record.get("ingested_type") or record.get("category") or "").casefold())
+    bookings = trip.get(collection) or [] if collection else []
+    if isinstance(bookings, dict):
+        bookings = [bookings]
+    visible = any(
+        isinstance(booking, dict) and (
+            (email_id and str(booking.get("source_email_id") or "") == email_id)
+            or (document and str(booking.get("document") or "") == document)
+            or (email_id and str(booking.get("cancelled_by_email") or "") == email_id)
+            or (email_id and str(booking.get("modified_by_email") or "") == email_id)
+        )
+        for booking in bookings
+    )
+    return True, visible
+
+
+def _read_trip_data(path: Path | None) -> list[dict] | None:
+    if path is None:
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise ValueError("trip data file is missing or invalid")
+    if not isinstance(value, list):
+        raise ValueError("trip data must be a list")
+    return value
+
+
+def build_report(records: list[dict], source_mode: str, intake_dir: Path | None = None, trip_data: list[dict] | None = None) -> dict:
     counts = {key: Counter() for key in ("provider", "category", "intent", "status", "reason", "validation", "trip", "persistence", "stage", "diagnosis")}
     facts = defaultdict(Counter)
     evidence = defaultdict(Counter)
@@ -211,6 +251,11 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
         validation, trip, persistence, stage, diagnosis = _outcomes(record, telemetry, field_presence)
         status = str(record.get("status") or "unknown")
         status = status if status in {"processed", "needs_review", "failed", "ignored", "received", "processing"} else "unknown"
+        trip_id_resolves, booking_visible = _booking_visibility(record, trip_data)
+        if trip_data is not None and status == "processed":
+            trip = "matched_visible" if booking_visible else "processed_but_not_visible"
+            if not booking_visible:
+                diagnosis = "processed_but_not_visible"
         reason_code = str(telemetry.get("validation_error_code") or "").strip().lower()
         reason_code = "none" if not reason_code else reason_code if reason_code in ALLOWED_ERRORS else "other_error"
         provider_outcomes[f"{provider.get('provider', 'unknown')}|{category or 'unknown'}|{status}|{reason_code}"] += 1
@@ -232,6 +277,8 @@ def build_report(records: list[dict], source_mode: str, intake_dir: Path | None 
                 "trip_match": trip,
                 "persistence": persistence,
                 "trip_id_present": bool(str(record.get("trip_id") or "").strip()),
+                "trip_id_resolves": trip_id_resolves,
+                "booking_visible": booking_visible,
                 "failed_field": str(telemetry.get("validation_error_field") or "") if str(telemetry.get("validation_error_field") or "") in FACT_FIELDS.get(category, ()) else "",
                 "missing_fields": sorted(field for field, presence in field_presence.items() if presence == "missing"),
             }
@@ -283,6 +330,7 @@ def main() -> int:
                         help="emit only machine-readable gate results and fail on violations")
     parser.add_argument("--latest-only", action="store_true", help="emit only the privacy-safe latest-record summary")
     parser.add_argument("--wait-terminal", type=int, default=0, help="wait for the latest record to leave received/processing")
+    parser.add_argument("--trip-data-file", type=Path, help="optional saved trip file for exact booking visibility read-back")
     args = parser.parse_args()
     if args.release_gate and args.latest_only:
         parser.error("--release-gate and --latest-only are mutually exclusive")
@@ -304,7 +352,12 @@ def main() -> int:
             except (OSError, ValueError, AttributeError, TypeError):
                 print("live index is invalid; refusing to run a synthetic fallback", file=sys.stderr)
                 return 2
-        report = build_report(records, mode, args.intake_dir)
+        try:
+            trip_data = _read_trip_data(args.trip_data_file)
+        except ValueError:
+            print("trip data file is missing or invalid", file=sys.stderr)
+            return 2
+        report = build_report(records, mode, args.intake_dir, trip_data)
         latest = report.get("latest_record_summary") or {}
         if time.monotonic() >= deadline or latest.get("status") not in {"received", "processing"}:
             break
