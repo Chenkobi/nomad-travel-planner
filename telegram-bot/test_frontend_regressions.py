@@ -126,6 +126,9 @@ class FrontendRegressionTests(unittest.TestCase):
         self.assertIn("url('assets/rain-window.jpg')", INDEX)
         rain_css = INDEX.split("body .hero.weather-rain{", 1)[1].split("</style>", 1)[0]
         self.assertNotIn("radial-gradient", rain_css)
+        self.assertIn("opacity:.7", rain_css, "the photo must be 30% transparent")
+        self.assertIn("body .hero.weather-rain.context-night{background-color:#000!important", INDEX)
+        self.assertIn("hero.classList.toggle('context-night',night)", INDEX)
         for marker in (".hero.weather-rain .context-card", "backdrop-filter:blur(24px)", "if(rainGlass){hero.style.removeProperty('background')", "card.style.removeProperty('background')"):
             self.assertIn(marker, INDEX, f"missing rainy Liquid Glass marker: {marker}")
         for marker in ('class="rain-glass-overlay"', 'class="pill liquid-glass-control"', "rainGlassSlide", "tripyRainDrops"):
@@ -188,7 +191,7 @@ class FrontendRegressionTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "deploy-ugreen.yml").read_text(encoding="utf-8")
         self.assertIn("live_travel_mode_markers_verified", workflow)
         self.assertIn("unexpected synthetic rain overlay", workflow)
-        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)"):
+        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)"):
             self.assertTrue(marker in workflow, f"deployment read-back is missing marker: {marker}")
 
 if __name__ == "__main__":
