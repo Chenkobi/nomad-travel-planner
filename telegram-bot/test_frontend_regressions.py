@@ -1,3 +1,5 @@
+import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -7,6 +9,80 @@ INDEX = (ROOT / "index.html").read_text(encoding="utf-8")
 
 
 class FrontendRegressionTests(unittest.TestCase):
+    def run_frontend_function(self, name, assertions):
+        function = re.search(rf"function {re.escape(name)}\([^)]*\)\{{[^{{}}]*\}}", INDEX)
+        if function is None:
+            self.fail(f"missing frontend helper: {name}")
+            return
+        subprocess.run(["node", "-e", function.group(0) + assertions], check=True, capture_output=True, text=True)
+
+    def test_rain_mode_requires_actual_rain_or_probability_above_50(self):
+        self.run_frontend_function(
+            "rainModeEnabled",
+            """
+const cases = [[61, 0, true], [2, 51, true], [2, 50, false], [3, 20, false], [71, 99, false]];
+for (const [code, probability, expected] of cases) {
+  if (rainModeEnabled(code, probability) !== expected) throw new Error(JSON.stringify({code, probability, expected}));
+}
+""",
+        )
+        self.assertIn("const rainy=rainModeEnabled(code,rainProbability)", INDEX)
+        self.assertIn("weatherCode===undefined&&card.dataset.weatherCode!==undefined", INDEX)
+        self.assertIn("applyContextMood(stop,w.code,w.rain)", INDEX)
+
+    def test_weather_background_is_blue_when_clear_gray_when_cloudy_and_black_at_night(self):
+        self.run_frontend_function(
+            "contextBackground",
+            """
+const cases = [[0, false, '#168bff'], [1, false, '#168bff'], [2, false, '#8a9299'], [3, false, '#8a9299'], [0, true, '#000']];
+for (const [code, night, expected] of cases) {
+  if (contextBackground(code, night) !== expected) throw new Error(JSON.stringify({code, night, expected}));
+}
+""",
+        )
+
+    def test_weather_forecast_horizon_is_limited_to_16_calendar_days(self):
+        self.run_frontend_function(
+            "forecastDateIsAvailable",
+            """
+if (!forecastDateIsAvailable('2026-11-01', '2026-10-17')) throw new Error('16th calendar day should be available');
+if (forecastDateIsAvailable('2026-11-02', '2026-10-17')) throw new Error('17th calendar day should not be available');
+if (forecastDateIsAvailable('2026-12-01', '2026-10-17')) throw new Error('December forecast should not be available yet');
+""",
+        )
+        self.assertIn("forecast_days=16", INDEX)
+        self.assertIn("תחזית עדיין לא זמינה", INDEX)
+        weather_loader = INDEX.split("async function loadWeather(", 1)[1].split("async function updateWeather(", 1)[0]
+        self.assertIn("const today=localDateInTimezone(stop.tz)", weather_loader)
+        self.assertIn("if(date>=today&&!forecastDateIsAvailable(date,today))return {unavailable:true}", weather_loader)
+        self.assertIn("if(w.unavailable)", INDEX)
+
+    def test_load_weather_respects_forecast_horizon_before_fetching(self):
+        start = INDEX.index("function forecastDateIsAvailable(")
+        end = INDEX.index("async function updateWeather(", start)
+        weather_functions = INDEX[start:end]
+        script = "const weatherCache = {}; " + weather_functions + """
+const RealDate = Date;
+global.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : ['2026-10-17T12:00:00Z'])); } static now() { return RealDate.parse('2026-10-17T12:00:00Z'); } };
+const requested = [];
+global.fetch = async (url) => { requested.push(String(url)); return {ok:true, json:async()=>({daily:{weather_code:[0],temperature_2m_max:[27],temperature_2m_min:[19],precipitation_probability_max:[15]}})}; };
+(async()=>{
+  const stop = {city:'Rome',tz:'Europe/Rome',lat:41.9028,lon:12.4964};
+  const near = await loadWeather(stop, '2026-11-01');
+  if (near.unavailable || !requested[0]?.includes('forecast_days=16')) throw new Error('16-day forecast was not requested');
+  const far = await loadWeather(stop, '2026-12-01');
+  if (!far.unavailable || requested.length !== 1) throw new Error('out-of-range forecast should not call the provider');
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_27_degrees_is_described_as_warm_and_pleasant(self):
+        self.run_frontend_function(
+            "temperatureFeeling",
+            "if (temperatureFeeling(27) !== 'חמים ונעים') throw new Error('27°C should feel warm and pleasant');",
+        )
+        self.assertIn("temperatureFeeling(w.max)", INDEX)
+
     def test_user_visible_dates_use_day_month_year_format(self):
         self.assertIn("function formatDisplayDate(value)", INDEX)
         self.assertIn("function formatDateText(value)", INDEX)
@@ -191,7 +267,7 @@ class FrontendRegressionTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "deploy-ugreen.yml").read_text(encoding="utf-8")
         self.assertIn("live_travel_mode_markers_verified", workflow)
         self.assertIn("unexpected synthetic rain overlay", workflow)
-        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)"):
+        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "forecast_days=16", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "#168bff", "#8a9299"):
             self.assertTrue(marker in workflow, f"deployment read-back is missing marker: {marker}")
 
 if __name__ == "__main__":
