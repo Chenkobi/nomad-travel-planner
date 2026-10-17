@@ -62,7 +62,7 @@ if (forecastDateIsAvailable('2026-12-01', '2026-10-17')) throw new Error('Decemb
         start = INDEX.index("function forecastDateIsAvailable(")
         end = INDEX.index("async function updateWeather(", start)
         weather_functions = INDEX[start:end]
-        script = "const weatherCache = {}; " + weather_functions + """
+        script = "const weatherCache = {}, weatherLocationCache = {}; " + weather_functions + """
 const RealDate = Date;
 global.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : ['2026-10-17T12:00:00Z'])); } static now() { return RealDate.parse('2026-10-17T12:00:00Z'); } };
 const requested = [];
@@ -74,6 +74,83 @@ global.fetch = async (url) => { const target=String(url); requested.push(target)
   const far = await loadWeather(stop, '2026-12-01');
   if (!far.unavailable || requested.length !== 1) throw new Error('out-of-range forecast should not call the provider');
 })().catch(error=>{console.error(error);process.exit(1)});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_trip_calendar_includes_flight_departure_and_arrival_dates(self):
+        self.run_frontend_function(
+            "tripCalendarRange",
+            """
+function localISODate(){return '2026-10-17';}
+const [start,end]=tripCalendarRange({start:'2026-11-10',end:'2026-11-12',flights:[{segments:[{schedule_departure_date:'2026-11-09',schedule_arrival_date:'2026-11-13'}]}]});
+if(start!=='2026-11-09'||end!=='2026-11-13')throw new Error(JSON.stringify({start,end}));
+const [flightOnlyStart,flightOnlyEnd]=tripCalendarRange({flights:[{departure_date:'2026-11-09',arrival_date:'2026-11-10'}]});
+if(flightOnlyStart!=='2026-11-09'||flightOnlyEnd!=='2026-11-10')throw new Error(JSON.stringify({flightOnlyStart,flightOnlyEnd}));
+""",
+        )
+        self.assertIn("const bounds=tripCalendarRange(t)", INDEX)
+
+    def test_flight_schedule_renders_departure_and_landing_rows(self):
+        start = INDEX.index("function eventDate(")
+        end = INDEX.index("function render()", start)
+        schedule_functions = INDEX[start:end]
+        script = "const events=[];let activeTrip={flights:[{flight_number:'SK123',airline:'Example Air',origin:'TLV',destination:'BUS',departure_date:'2026-11-09',departure_time:'06:20',arrival_date:'2026-11-10',arrival_time:'09:15'}]};" + schedule_functions + """
+const rows=displayEvents().filter(event=>event[4]==='טיסה');
+if(rows.length!==2)throw new Error('expected departure and landing rows: '+JSON.stringify(rows));
+const departure=rows.find(event=>event[2].includes('המראה'));
+const landing=rows.find(event=>event[2].includes('נחיתה'));
+if(!departure||departure[0]!=='06:20'||departure[6]!=='2026-11-09'||!departure[3].includes('2026-11-09'))throw new Error('departure missing or misplaced: '+JSON.stringify(departure));
+if(!landing||landing[0]!=='09:15'||landing[6]!=='2026-11-10'||!landing[3].includes('2026-11-10'))throw new Error('landing missing or misplaced: '+JSON.stringify(landing));
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_flight_schedule_edit_targets_departure_and_arrival_fields(self):
+        start = INDEX.index("function derivedTarget(e)")
+        end = INDEX.index("async function saveTypedTripChange(", start)
+        target_function = INDEX[start:end]
+        script = "function eventDate(event){return event?.[6]||null;}let activeTrip={flights:[{number:'SK123',departure_date:'2026-11-09',arrival_date:'2026-11-10'}]};" + target_function + """
+const departure=derivedTarget(['06:20','✈️','המראה · SK123','TLV → BUS','טיסה','PDF','2026-11-09']);
+const landing=derivedTarget(['09:15','🛬','נחיתה · SK123','BUS · נחיתה 09:15','טיסה','PDF','2026-11-10']);
+if(!departure||departure.field!=='schedule_departure_time'||departure.dateField!=='schedule_departure_date')throw new Error('departure edit target is wrong: '+JSON.stringify(departure));
+if(!landing||landing.field!=='schedule_arrival_time'||landing.dateField!=='schedule_arrival_date'||landing.hiddenField!=='schedule_arrival_hidden')throw new Error('arrival edit target is wrong: '+JSON.stringify(landing));
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_legacy_flight_event_is_preserved_and_deduplicated_only_when_matched(self):
+        start = INDEX.index("function eventDate(")
+        end = INDEX.index("function render()", start)
+        schedule_functions = INDEX[start:end]
+        script = "let events=[];let activeTrip={start:'2026-11-10',end:'2026-11-12',flights:[{flight_number:'SK123',airline:'Example Air',origin:'TLV',destination:'BUS',departure_date:'2026-11-09',departure_time:'06:20',arrival_date:'2026-11-10',arrival_time:'09:15'}]};" + schedule_functions + """
+const matching=['06:20','✈️','טיסה Example Air SK123','TLV → BUS','טיסה','PDF','2026-11-09'];
+const unmatched=['07:00','✈️','טיסה Other Air OA321','ATH → BUS','טיסה','PDF','2026-11-10'];
+events=[matching,unmatched];
+const rows=displayEvents().filter(event=>event[4]==='טיסה');
+if(rows.length!==3||rows.filter(event=>event[2].includes('המראה')).length!==1)throw new Error('expected departure/landing rows plus one unrelated legacy flight: '+JSON.stringify(rows));
+if(!rows.some(event=>event[2]==='טיסה Other Air OA321'&&event[6]==='2026-11-10'))throw new Error('unmatched flight event was dropped: '+JSON.stringify(rows));
+if(rows.some(event=>event[2]==='טיסה Example Air SK123'))throw new Error('duplicate base flight was not removed: '+JSON.stringify(rows));
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_batumi_uses_its_own_weather_location(self):
+        self.run_frontend_function(
+            "weatherLocationForCity",
+            """
+const english=weatherLocationForCity('Batumi');
+const hebrew=weatherLocationForCity('באטומי');
+for(const location of [english,hebrew])if(!location||location[0]!==41.64077||location[1]!==41.6306||location[2]!=='Asia/Tbilisi')throw new Error(JSON.stringify(location));
+""",
+        )
+
+    def test_unknown_destination_is_geocoded_before_weather_fetch(self):
+        start = INDEX.index("function forecastDateIsAvailable(")
+        end = INDEX.index("async function updateWeather(", start)
+        weather_functions = INDEX[start:end]
+        script = "const weatherCache={},weatherLocationCache={}; " + weather_functions + """
+const RealDate=Date;
+global.Date=class extends RealDate{constructor(...args){super(...(args.length?args:['2026-10-17T12:00:00Z']))}static now(){return RealDate.parse('2026-10-17T12:00:00Z')}};
+const requested=[];
+global.fetch=async url=>{const target=String(url);requested.push(target);if(target.includes('geocoding-api.open-meteo.com'))return {ok:true,json:async()=>({results:[{name:'Batumi',country:'Georgia',latitude:41.64077,longitude:41.6306,timezone:'Asia/Tbilisi'}]})};return {ok:true,json:async()=>({daily:{weather_code:[2],temperature_2m_max:[27],temperature_2m_min:[19],precipitation_probability_max:[15]}})}};
+(async()=>{const stop={city:'Batumi',country:'Georgia',lat:0,lon:0,tz:'Europe/Berlin'};const result=await loadWeather(stop,'2026-11-01');if(result.max!==27)throw new Error('forecast missing');if(stop.lat!==41.64077||stop.lon!==41.6306||stop.tz!=='Asia/Tbilisi')throw new Error('resolved location not applied: '+JSON.stringify(stop));if(requested.length!==2||!requested[0].includes('geocoding-api.open-meteo.com')||!requested[1].includes('latitude=41.64077')||!requested[1].includes('longitude=41.6306')||!requested[1].includes('timezone=Asia%2FTbilisi'))throw new Error('forecast did not use geocoded coordinates: '+JSON.stringify(requested))})().catch(error=>{console.error(error);process.exit(1)});
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
@@ -249,6 +326,9 @@ global.fetch = async (url) => { const target=String(url); requested.push(target)
 
     def test_flight_date_fallbacks_are_rendered(self):
         self.assertIn("f.schedule_departure_date||f.departure_date||f.date||f.start", INDEX)
+        self.assertIn("f.schedule_arrival_date||f.arrival_date||departureDate", INDEX)
+        self.assertIn("flightScheduleEvents(segment)", INDEX)
+        self.assertIn("tripCalendarRange(t)", INDEX)
         self.assertIn("f.flight_number", INDEX)
 
     def test_remote_trip_sync_does_not_overwrite_local_trips_when_server_is_empty(self):
@@ -268,7 +348,9 @@ global.fetch = async (url) => { const target=String(url); requested.push(target)
         workflow = (ROOT / ".github" / "workflows" / "deploy-ugreen.yml").read_text(encoding="utf-8")
         self.assertIn("live_travel_mode_markers_verified", workflow)
         self.assertIn("unexpected synthetic rain overlay", workflow)
-        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "raining=[61,63,65,66,67,80,81,82,95,96,99]", "forecastDateIsAvailable(date,today)", "start_date=${date}&end_date=${date}", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "#168bff", "#8a9299"):
+        self.assertIn("container_status={{.State.Status}} exit_code={{.State.ExitCode}}", workflow)
+        self.assertNotIn("docker logs --tail", workflow)
+        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "raining=[61,63,65,66,67,80,81,82,95,96,99]", "forecastDateIsAvailable(date,today)", "start_date=${date}&end_date=${date}", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "function tripCalendarRange(trip)", "tripCalendarRange(t)", "function flightScheduleEvents(f)", "flightScheduleEvents(segment)", "function flightRecordMatchesEvent(f,event)", "schedule_arrival_date", "schedule_arrival_time", "schedule_arrival_hidden", "המראה", "נחיתה", "function weatherLocationForCity(city)", "41.64077,41.6306", "Asia/Tbilisi", "async function resolveWeatherLocation(stop)", "geocoding-api.open-meteo.com", "weatherLocationCache", "#168bff", "#8a9299"):
             self.assertTrue(marker in workflow, f"deployment read-back is missing marker: {marker}")
 
 if __name__ == "__main__":
