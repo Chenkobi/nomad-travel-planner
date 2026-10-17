@@ -20,7 +20,7 @@ class FrontendRegressionTests(unittest.TestCase):
         self.run_frontend_function(
             "rainModeEnabled",
             """
-const cases = [[61, 0, true], [2, 51, true], [2, 50, false], [3, 20, false], [71, 99, false]];
+const cases = [[51, 20, false], [53, 20, false], [55, 50, false], [51, 51, true], [61, 0, true], [2, 51, true], [2, 50, false], [3, 20, false], [71, 99, false]];
 for (const [code, probability, expected] of cases) {
   if (rainModeEnabled(code, probability) !== expected) throw new Error(JSON.stringify({code, probability, expected}));
 }
@@ -268,7 +268,7 @@ global.fetch = async (url) => { const target=String(url); requested.push(target)
         workflow = (ROOT / ".github" / "workflows" / "deploy-ugreen.yml").read_text(encoding="utf-8")
         self.assertIn("live_travel_mode_markers_verified", workflow)
         self.assertIn("unexpected synthetic rain overlay", workflow)
-        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "forecastDateIsAvailable(date,today)", "start_date=${date}&end_date=${date}", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "#168bff", "#8a9299"):
+        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "raining=[61,63,65,66,67,80,81,82,95,96,99]", "forecastDateIsAvailable(date,today)", "start_date=${date}&end_date=${date}", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "#168bff", "#8a9299"):
             self.assertTrue(marker in workflow, f"deployment read-back is missing marker: {marker}")
 
 if __name__ == "__main__":
