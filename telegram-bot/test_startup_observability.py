@@ -52,7 +52,7 @@ class StartupObservabilityTests(unittest.TestCase):
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)
         thread.start()
         try:
-            for path in ("/assets/destinations/batumi-ali-nino.jpg", "/assets/destinations/milan.jpg", "/assets/destinations/italy-colosseum.jpg"):
+            for path in ("/assets/destinations/batumi-beach.jpg", "/assets/destinations/milan.jpg", "/assets/destinations/italy-colosseum.jpg", "/assets/destinations/north-italy-venice.jpg"):
                 connection = HTTPConnection("127.0.0.1", httpd.server_port, timeout=2)
                 connection.request("GET", path)
                 response = connection.getresponse()
