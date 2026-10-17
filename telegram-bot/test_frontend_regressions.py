@@ -62,7 +62,7 @@ if (forecastDateIsAvailable('2026-12-01', '2026-10-17')) throw new Error('Decemb
         start = INDEX.index("function forecastDateIsAvailable(")
         end = INDEX.index("async function updateWeather(", start)
         weather_functions = INDEX[start:end]
-        script = "const weatherCache = {}, weatherLocationCache = {}; " + weather_functions + """
+        script = "const WEATHER_CACHE_TTL_MS=15*60*1000,weatherCache={},weatherLocationCache={},weatherRequests={}; " + weather_functions + """
 const RealDate = Date;
 global.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : ['2026-10-17T12:00:00Z'])); } static now() { return RealDate.parse('2026-10-17T12:00:00Z'); } };
 const requested = [];
@@ -76,6 +76,22 @@ global.fetch = async (url) => { const target=String(url); requested.push(target)
 })().catch(error=>{console.error(error);process.exit(1)});
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_weather_cache_expires_and_fetches_updated_forecast(self):
+        start = INDEX.index("function forecastDateIsAvailable(")
+        end = INDEX.index("async function updateWeather(", start)
+        weather_functions = INDEX[start:end]
+        script = "const WEATHER_CACHE_TTL_MS=15*60*1000,weatherCache={},weatherLocationCache={},weatherRequests={};" + weather_functions + """
+const RealDate=Date;
+let currentTime=RealDate.parse('2026-10-17T12:00:00Z');
+global.Date=class extends RealDate{constructor(...args){super(...(args.length?args:[currentTime]))}static now(){return currentTime}};
+let requestCount=0;
+global.fetch=async()=>{requestCount++;const code=requestCount===1?0:3;return {ok:true,json:async()=>({daily:{weather_code:[code],temperature_2m_max:[23+requestCount],temperature_2m_min:[18],precipitation_probability_max:[5+requestCount]}})}};
+(async()=>{const stop={city:'Batumi',country:'Georgia',lat:41.64077,lon:41.6306,tz:'Asia/Tbilisi'};const first=await loadWeather(stop,'2026-10-17');const cached=await loadWeather(stop,'2026-10-17');if(first.code!==0||cached.code!==0||requestCount!==1)throw new Error('fresh cache should avoid a second provider request');currentTime+=WEATHER_CACHE_TTL_MS+1;const refreshed=await loadWeather(stop,'2026-10-17');if(requestCount!==2||refreshed.code!==3||refreshed.max!==25)throw new Error('expired cache did not return the updated forecast: '+JSON.stringify({requestCount,refreshed}))})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+        self.assertIn("setInterval(refreshSelectedWeather,WEATHER_CACHE_TTL_MS)", INDEX)
+        self.assertIn("document.addEventListener('visibilitychange'", INDEX)
 
     def test_trip_calendar_includes_flight_departure_and_arrival_dates(self):
         self.run_frontend_function(
@@ -145,7 +161,7 @@ for(const location of [english,hebrew])if(!location||location[0]!==41.64077||loc
         start = INDEX.index("function forecastDateIsAvailable(")
         end = INDEX.index("async function updateWeather(", start)
         weather_functions = INDEX[start:end]
-        script = "const weatherCache={},weatherLocationCache={}; " + weather_functions + """
+        script = "const WEATHER_CACHE_TTL_MS=15*60*1000,weatherCache={},weatherLocationCache={},weatherRequests={}; " + weather_functions + """
 const RealDate=Date;
 global.Date=class extends RealDate{constructor(...args){super(...(args.length?args:['2026-10-17T12:00:00Z']))}static now(){return RealDate.parse('2026-10-17T12:00:00Z')}};
 const requested=[];
@@ -350,7 +366,7 @@ global.fetch=async url=>{const target=String(url);requested.push(target);if(targ
         self.assertIn("unexpected synthetic rain overlay", workflow)
         self.assertIn("container_status={{.State.Status}} exit_code={{.State.ExitCode}}", workflow)
         self.assertNotIn("docker logs --tail", workflow)
-        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "raining=[61,63,65,66,67,80,81,82,95,96,99]", "forecastDateIsAvailable(date,today)", "start_date=${date}&end_date=${date}", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "function tripCalendarRange(trip)", "tripCalendarRange(t)", "function flightScheduleEvents(f)", "flightScheduleEvents(segment)", "function flightRecordMatchesEvent(f,event)", "schedule_arrival_date", "schedule_arrival_time", "schedule_arrival_hidden", "המראה", "נחיתה", "function weatherLocationForCity(city)", "41.64077,41.6306", "Asia/Tbilisi", "async function resolveWeatherLocation(stop)", "geocoding-api.open-meteo.com", "weatherLocationCache", "#168bff", "#8a9299"):
+        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "raining=[61,63,65,66,67,80,81,82,95,96,99]", "forecastDateIsAvailable(date,today)", "start_date=${date}&end_date=${date}", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "function tripCalendarRange(trip)", "tripCalendarRange(t)", "function flightScheduleEvents(f)", "flightScheduleEvents(segment)", "function flightRecordMatchesEvent(f,event)", "schedule_arrival_date", "schedule_arrival_time", "schedule_arrival_hidden", "המראה", "נחיתה", "function weatherLocationForCity(city)", "41.64077,41.6306", "Asia/Tbilisi", "async function resolveWeatherLocation(stop)", "geocoding-api.open-meteo.com", "weatherLocationCache", "WEATHER_CACHE_TTL_MS=15*60*1000", "cached.fetchedAt<WEATHER_CACHE_TTL_MS", "setInterval(refreshSelectedWeather,WEATHER_CACHE_TTL_MS)", "document.addEventListener('visibilitychange'", "#168bff", "#8a9299"):
             self.assertTrue(marker in workflow, f"deployment read-back is missing marker: {marker}")
 
 if __name__ == "__main__":
