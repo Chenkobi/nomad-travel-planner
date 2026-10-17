@@ -104,11 +104,13 @@ const generic='https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto
 const batumi=destinationCoverImage({title:'גיאורגיה באטומי',image:generic,destinations:[{city:'Batumi',country:'Georgia'}]});
 const milan=destinationCoverImage({title:'איטליה מילאנו',image:generic,destinations:[{city:'מילאנו',country:'איטליה'}]});
 const italy=destinationCoverImage({title:'Italy',image:generic,destinations:[{country:'Italy'}]});
+const italyRome=destinationCoverImage({title:'Italy · Rome',destinations:[{city:'Rome',country:'Italy'}]});
 const multi=destinationCoverImage({title:'Italy · Milan · Batumi',destinations:[{city:'Milan',country:'Italy'},{city:'Batumi',country:'Georgia'}]});
-if(batumi!=='/assets/destinations/batumi.jpg')throw new Error('wrong Batumi cover: '+batumi);
+if(batumi!=='/assets/destinations/batumi-ali-nino.jpg')throw new Error('wrong Batumi cover: '+batumi);
 if(milan!=='/assets/destinations/milan.jpg')throw new Error('wrong Milan cover: '+milan);
 if(multi!=='/assets/destinations/milan.jpg')throw new Error('multi-destination cover should use first destination: '+multi);
-if(italy!=='/assets/destinations/italy.jpg')throw new Error('wrong Italy cover: '+italy);
+if(italy!=='/assets/destinations/italy-colosseum.jpg')throw new Error('wrong Italy cover: '+italy);
+if(italyRome!=='/assets/destinations/italy-colosseum.jpg')throw new Error('Italian city should use Italian country cover: '+italyRome);
 const explicit=destinationCoverImage({title:'Auckland',destinations:[{city:'Auckland',image:'/special/auckland.jpg'}]});
 if(explicit!=='/special/auckland.jpg')throw new Error('specific destination image should be preserved: '+explicit);
 const fallback=destinationCoverImage({title:'Unknown trip',image:'/custom/cover.jpg'});
@@ -117,9 +119,9 @@ if(fallback!=='/custom/cover.jpg')throw new Error('custom fallback image should 
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
         self.assertIn("const image=destinationCoverImage(t,i)", INDEX)
         self.assertIn("const coverImage=destinationCoverImage(t,trips.indexOf(t))", INDEX)
-        self.assertIn("/assets/destinations/batumi.jpg", INDEX)
+        self.assertIn("/assets/destinations/batumi-ali-nino.jpg", INDEX)
         self.assertIn("/assets/destinations/milan.jpg", INDEX)
-        self.assertIn("/assets/destinations/italy.jpg", INDEX)
+        self.assertIn("/assets/destinations/italy-colosseum.jpg", INDEX)
 
     def test_trip_calendar_includes_flight_departure_and_arrival_dates(self):
         self.run_frontend_function(
@@ -392,11 +394,11 @@ global.fetch=async url=>{const target=String(url);requested.push(target);if(targ
         workflow = (ROOT / ".github" / "workflows" / "deploy-ugreen.yml").read_text(encoding="utf-8")
         self.assertIn("live_travel_mode_markers_verified", workflow)
         self.assertIn("unexpected synthetic rain overlay", workflow)
-        self.assertIn("for image in batumi milan italy", workflow)
+        self.assertIn("for image in batumi-ali-nino milan italy-colosseum", workflow)
         self.assertIn("COPY assets/destinations/ /app/assets/destinations/", (ROOT / "Dockerfile").read_text(encoding="utf-8"))
         self.assertIn("container_status={{.State.Status}} exit_code={{.State.ExitCode}}", workflow)
         self.assertNotIn("docker logs --tail", workflow)
-        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "raining=[61,63,65,66,67,80,81,82,95,96,99]", "forecastDateIsAvailable(date,today)", "start_date=${date}&end_date=${date}", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "function tripCalendarRange(trip)", "tripCalendarRange(t)", "function flightScheduleEvents(f)", "flightScheduleEvents(segment)", "function flightRecordMatchesEvent(f,event)", "schedule_arrival_date", "schedule_arrival_time", "schedule_arrival_hidden", "המראה", "נחיתה", "function weatherLocationForCity(city)", "41.64077,41.6306", "Asia/Tbilisi", "async function resolveWeatherLocation(stop)", "geocoding-api.open-meteo.com", "weatherLocationCache", "WEATHER_CACHE_TTL_MS=15*60*1000", "cached.fetchedAt<WEATHER_CACHE_TTL_MS", "setInterval(refreshSelectedWeather,WEATHER_CACHE_TTL_MS)", "document.addEventListener", "visibilitychange", "function destinationCoverImage", "/assets/destinations/batumi.jpg", "/assets/destinations/milan.jpg", "/assets/destinations/italy.jpg", "#168bff", "#8a9299"):
+        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "raining=[61,63,65,66,67,80,81,82,95,96,99]", "forecastDateIsAvailable(date,today)", "start_date=${date}&end_date=${date}", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "function tripCalendarRange(trip)", "tripCalendarRange(t)", "function flightScheduleEvents(f)", "flightScheduleEvents(segment)", "function flightRecordMatchesEvent(f,event)", "schedule_arrival_date", "schedule_arrival_time", "schedule_arrival_hidden", "המראה", "נחיתה", "function weatherLocationForCity(city)", "41.64077,41.6306", "Asia/Tbilisi", "async function resolveWeatherLocation(stop)", "geocoding-api.open-meteo.com", "weatherLocationCache", "WEATHER_CACHE_TTL_MS=15*60*1000", "cached.fetchedAt<WEATHER_CACHE_TTL_MS", "setInterval(refreshSelectedWeather,WEATHER_CACHE_TTL_MS)", "document.addEventListener", "visibilitychange", "function destinationCoverImage", "/assets/destinations/batumi-ali-nino.jpg", "/assets/destinations/milan.jpg", "/assets/destinations/italy-colosseum.jpg", "#168bff", "#8a9299"):
             self.assertTrue(marker in workflow, f"deployment read-back is missing marker: {marker}")
 
 if __name__ == "__main__":

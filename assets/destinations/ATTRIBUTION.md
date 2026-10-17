@@ -1,10 +1,10 @@
 Destination cover images
 ========================
 
-Local JPEGs are used so cover selection does not send trip destinations to an image-search service at runtime.
+Local JPEGs keep destination lookup private and avoid runtime image-search calls. The covers use recognizable landmarks and horizontal crops suited to the trip cards.
 
-- batumi.jpg — Unsplash image `photo-1722436394396-2e6acd0e0c3b`; source: https://images.unsplash.com/photo-1722436394396-2e6acd0e0c3b; Unsplash License.
-- milan.jpg — Duomo di Milano, Unsplash image `photo-1766475341256-689f4f6ef4cf`; source: https://images.unsplash.com/photo-1766475341256-689f4f6ef4cf; Unsplash License.
-- italy.jpg — Tuscan countryside, Unsplash image `photo-1781961542738-8f0984bf364e`; source: https://images.unsplash.com/photo-1781961542738-8f0984bf364e; Unsplash License.
+- batumi-ali-nino.jpg — Ali and Nino sculpture, Pexels photo 18097203 by Esra Kaya. Source: https://www.pexels.com/photo/ali-and-nino-sculpture-in-batumi-georgia-18097203/ . Pexels License: https://www.pexels.com/license/ .
+- milan.jpg — Duomo di Milano, Unsplash image `photo-1766475341256-689f4f6ef4cf`; source: https://images.unsplash.com/photo-1766475341256-689f4f6ef4cf ; Unsplash License: https://unsplash.com/license .
+- italy-colosseum.jpg — Colosseum exterior, Unsplash image `photo-1515542622106-78bda8ba0e5b`; source: https://images.unsplash.com/photo-1515542622106-78bda8ba0e5b ; Unsplash License: https://unsplash.com/license .
 
-Downloaded and visually checked on 2026-10-17. The Unsplash license does not require attribution; these source references are retained for traceability.
+Downloaded and visually checked on 2026-10-17. The source references are retained for traceability; the selected licenses permit reuse.
