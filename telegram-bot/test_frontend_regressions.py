@@ -50,11 +50,12 @@ if (forecastDateIsAvailable('2026-11-02', '2026-10-17')) throw new Error('17th c
 if (forecastDateIsAvailable('2026-12-01', '2026-10-17')) throw new Error('December forecast should not be available yet');
 """,
         )
-        self.assertIn("forecast_days=16", INDEX)
         self.assertIn("תחזית עדיין לא זמינה", INDEX)
         weather_loader = INDEX.split("async function loadWeather(", 1)[1].split("async function updateWeather(", 1)[0]
         self.assertIn("const today=localDateInTimezone(stop.tz)", weather_loader)
         self.assertIn("if(date>=today&&!forecastDateIsAvailable(date,today))return {unavailable:true}", weather_loader)
+        self.assertIn("&start_date=${date}&end_date=${date}", weather_loader)
+        self.assertNotIn("forecast_days=", weather_loader)
         self.assertIn("if(w.unavailable)", INDEX)
 
     def test_load_weather_respects_forecast_horizon_before_fetching(self):
@@ -65,11 +66,11 @@ if (forecastDateIsAvailable('2026-12-01', '2026-10-17')) throw new Error('Decemb
 const RealDate = Date;
 global.Date = class extends RealDate { constructor(...args) { super(...(args.length ? args : ['2026-10-17T12:00:00Z'])); } static now() { return RealDate.parse('2026-10-17T12:00:00Z'); } };
 const requested = [];
-global.fetch = async (url) => { requested.push(String(url)); return {ok:true, json:async()=>({daily:{weather_code:[0],temperature_2m_max:[27],temperature_2m_min:[19],precipitation_probability_max:[15]}})}; };
+global.fetch = async (url) => { const target=String(url); requested.push(target); return {ok:!target.includes('forecast_days='), json:async()=>({daily:{weather_code:[0],temperature_2m_max:[27],temperature_2m_min:[19],precipitation_probability_max:[15]}})}; };
 (async()=>{
   const stop = {city:'Rome',tz:'Europe/Rome',lat:41.9028,lon:12.4964};
   const near = await loadWeather(stop, '2026-11-01');
-  if (near.unavailable || !requested[0]?.includes('forecast_days=16')) throw new Error('16-day forecast was not requested');
+  if (near.unavailable || !requested[0]?.includes('start_date=2026-11-01') || !requested[0]?.includes('end_date=2026-11-01') || requested[0]?.includes('forecast_days=')) throw new Error('single-day forecast request has incompatible parameters');
   const far = await loadWeather(stop, '2026-12-01');
   if (!far.unavailable || requested.length !== 1) throw new Error('out-of-range forecast should not call the provider');
 })().catch(error=>{console.error(error);process.exit(1)});
@@ -267,7 +268,7 @@ global.fetch = async (url) => { requested.push(String(url)); return {ok:true, js
         workflow = (ROOT / ".github" / "workflows" / "deploy-ugreen.yml").read_text(encoding="utf-8")
         self.assertIn("live_travel_mode_markers_verified", workflow)
         self.assertIn("unexpected synthetic rain overlay", workflow)
-        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "forecast_days=16", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "#168bff", "#8a9299"):
+        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "forecastDateIsAvailable(date,today)", "start_date=${date}&end_date=${date}", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "#168bff", "#8a9299"):
             self.assertTrue(marker in workflow, f"deployment read-back is missing marker: {marker}")
 
 if __name__ == "__main__":
