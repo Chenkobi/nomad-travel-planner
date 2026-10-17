@@ -20,15 +20,32 @@ class FrontendRegressionTests(unittest.TestCase):
         self.run_frontend_function(
             "rainModeEnabled",
             """
-const cases = [[51, 20, false], [53, 20, false], [55, 50, false], [51, 51, true], [61, 0, true], [2, 51, true], [2, 50, false], [3, 20, false], [71, 99, false]];
-for (const [code, probability, expected] of cases) {
-  if (rainModeEnabled(code, probability) !== expected) throw new Error(JSON.stringify({code, probability, expected}));
+const cases = [[51, 20, false, false], [53, 20, false, false], [55, 50, false, false], [51, 51, false, true], [61, 0, false, false], [61, 0, true, true], [80, 21, false, false], [2, 51, false, true], [2, 50, false, false], [3, 20, false, false], [71, 99, false, false]];
+for (const [code, probability, actualRain, expected] of cases) {
+  if (rainModeEnabled(code, probability, actualRain) !== expected) throw new Error(JSON.stringify({code, probability, actualRain, expected}));
 }
 """,
         )
-        self.assertIn("const rainy=rainModeEnabled(code,rainProbability)", INDEX)
+        self.assertIn("const rainy=rainModeEnabled(code,rainProbability,actualRain)", INDEX)
         self.assertIn("weatherCode===undefined&&card.dataset.weatherCode!==undefined", INDEX)
-        self.assertIn("applyContextMood(stop,w.code,w.rain)", INDEX)
+        self.assertIn("applyContextMood(stop,w.code,w.rain,w.actualRain)", INDEX)
+        self.assertIn("outfit(w.max,w.min,w.rain,w.code,w.actualRain)", INDEX)
+
+    def test_observed_rain_requires_measured_rain_and_excludes_drizzle(self):
+        self.run_frontend_function(
+            "observedRainNow",
+            """
+const cases = [
+  [{weather_code:80,rain:0,showers:0}, false],
+  [{weather_code:80,rain:0.2,showers:0}, true],
+  [{weather_code:80,rain:0,showers:0.3}, true],
+  [{weather_code:53,rain:0.2,showers:0}, false],
+  [{weather_code:71,rain:0,showers:0}, false],
+  [null, false]
+];
+for (const [current, expected] of cases) if (observedRainNow(current) !== expected) throw new Error(JSON.stringify({current, expected}));
+""",
+        )
 
     def test_weather_background_is_blue_when_clear_gray_when_cloudy_and_black_at_night(self):
         self.run_frontend_function(
@@ -59,7 +76,7 @@ if (forecastDateIsAvailable('2026-12-01', '2026-10-17')) throw new Error('Decemb
         self.assertIn("if(w.unavailable)", INDEX)
 
     def test_load_weather_respects_forecast_horizon_before_fetching(self):
-        start = INDEX.index("function forecastDateIsAvailable(")
+        start = INDEX.index("function observedRainNow(")
         end = INDEX.index("async function updateWeather(", start)
         weather_functions = INDEX[start:end]
         script = "const WEATHER_CACHE_TTL_MS=15*60*1000,weatherCache={},weatherLocationCache={},weatherRequests={}; " + weather_functions + """
@@ -78,7 +95,7 @@ global.fetch = async (url) => { const target=String(url); requested.push(target)
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
     def test_weather_cache_expires_and_fetches_updated_forecast(self):
-        start = INDEX.index("function forecastDateIsAvailable(")
+        start = INDEX.index("function observedRainNow(")
         end = INDEX.index("async function updateWeather(", start)
         weather_functions = INDEX[start:end]
         script = "const WEATHER_CACHE_TTL_MS=15*60*1000,weatherCache={},weatherLocationCache={},weatherRequests={};" + weather_functions + """
@@ -92,6 +109,19 @@ global.fetch=async()=>{requestCount++;const code=requestCount===1?0:3;return {ok
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
         self.assertIn("setInterval(refreshSelectedWeather,WEATHER_CACHE_TTL_MS)", INDEX)
         self.assertIn("document.addEventListener('visibilitychange'", INDEX)
+
+    def test_load_weather_only_uses_observed_rain_for_the_local_current_date(self):
+        start = INDEX.index("function observedRainNow(")
+        end = INDEX.index("async function updateWeather(", start)
+        weather_functions = INDEX[start:end]
+        script = "const WEATHER_CACHE_TTL_MS=15*60*1000,weatherCache={},weatherLocationCache={},weatherRequests={};" + weather_functions + """
+const RealDate=Date;
+global.Date=class extends RealDate{constructor(...args){super(...(args.length?args:['2026-10-17T12:00:00Z']))}static now(){return RealDate.parse('2026-10-17T12:00:00Z')}};
+const requests=[];
+global.fetch=async url=>{requests.push(String(url));return {ok:true,json:async()=>({current:{weather_code:80,rain:0.2,showers:0},daily:{weather_code:[80],temperature_2m_max:[20],temperature_2m_min:[17],precipitation_probability_max:[21]}})}};
+(async()=>{const stop={city:'Batumi',country:'Georgia',lat:41.64077,lon:41.6306,tz:'Asia/Tbilisi'};const today=await loadWeather(stop,'2026-10-17');const future=await loadWeather(stop,'2026-10-23');if(!today.actualRain)throw new Error('current measured rain was not returned');if(future.actualRain)throw new Error('current conditions leaked into a future forecast');if(!requests[0].includes('current=weather_code,rain,showers'))throw new Error('current conditions were not requested for today');if(requests[1].includes('current=weather_code,rain,showers'))throw new Error('current conditions should not be requested as future observations')})().catch(error=>{console.error(error);process.exit(1)});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
     def test_trip_cover_image_matches_destination(self):
         if "function destinationCoverImage(" not in INDEX:
@@ -191,7 +221,7 @@ for(const location of [english,hebrew])if(!location||location[0]!==41.64077||loc
         )
 
     def test_unknown_destination_is_geocoded_before_weather_fetch(self):
-        start = INDEX.index("function forecastDateIsAvailable(")
+        start = INDEX.index("function observedRainNow(")
         end = INDEX.index("async function updateWeather(", start)
         weather_functions = INDEX[start:end]
         script = "const WEATHER_CACHE_TTL_MS=15*60*1000,weatherCache={},weatherLocationCache={},weatherRequests={}; " + weather_functions + """
@@ -329,7 +359,9 @@ global.fetch=async url=>{const target=String(url);requested.push(target);if(targ
         self.assertIn("url('assets/rain-window.jpg')", INDEX)
         rain_css = INDEX.split("body .hero.weather-rain{", 1)[1].split("</style>", 1)[0]
         self.assertNotIn("radial-gradient", rain_css)
-        self.assertIn("opacity:.7", rain_css, "the photo must be 30% transparent")
+        self.assertIn("opacity:.85", rain_css, "the drops should remain visible while the overlay preserves readability")
+        self.assertIn("rgba(4,13,22,.30)", rain_css)
+        self.assertIn("text-shadow:0 2px 8px rgba(0,0,0,.8)", rain_css)
         self.assertIn("body .hero.weather-rain.context-night{background-color:#000!important", INDEX)
         self.assertIn("hero.classList.toggle('context-night',night)", INDEX)
         for marker in (".hero.weather-rain .context-card", "backdrop-filter:blur(24px)", "if(rainGlass){hero.style.removeProperty('background')", "card.style.removeProperty('background')"):
@@ -401,7 +433,7 @@ global.fetch=async url=>{const target=String(url);requested.push(target);if(targ
         self.assertIn("COPY assets/destinations/ /app/assets/destinations/", (ROOT / "Dockerfile").read_text(encoding="utf-8"))
         self.assertIn("container_status={{.State.Status}} exit_code={{.State.ExitCode}}", workflow)
         self.assertNotIn("docker logs --tail", workflow)
-        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.7", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability)", "raining=[61,63,65,66,67,80,81,82,95,96,99]", "forecastDateIsAvailable(date,today)", "start_date=${date}&end_date=${date}", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "function tripCalendarRange(trip)", "tripCalendarRange(t)", "function flightScheduleEvents(f)", "flightScheduleEvents(segment)", "function flightRecordMatchesEvent(f,event)", "schedule_arrival_date", "schedule_arrival_time", "schedule_arrival_hidden", "המראה", "נחיתה", "function weatherLocationForCity(city)", "41.64077,41.6306", "Asia/Tbilisi", "async function resolveWeatherLocation(stop)", "geocoding-api.open-meteo.com", "weatherLocationCache", "WEATHER_CACHE_TTL_MS=15*60*1000", "cached.fetchedAt<WEATHER_CACHE_TTL_MS", "setInterval(refreshSelectedWeather,WEATHER_CACHE_TTL_MS)", "document.addEventListener", "visibilitychange", "function destinationCoverImage", "/assets/destinations/batumi-beach.jpg", "/assets/destinations/milan.jpg", "/assets/destinations/italy-colosseum.jpg", "/assets/destinations/north-italy-venice.jpg", "#168bff", "#8a9299"):
+        for marker in ("openTravelMode", "travelModeModal", "data-travel-nav", "event-icon", "assets/rain-window.jpg", "opacity:.85", "function observedRainNow(current)", "current=weather_code,rain,showers", "actualRain:date===today&&observedRainNow(data.current)", "rgba(4,13,22,.30)", "text-shadow:0 2px 8px rgba(0,0,0,.8)", "background-color:#000!important", "hero.classList.toggle", "image/jpeg", "rain-glass-overlay", "liquid-glass-control", "backdrop-filter:blur(24px)", "rainModeEnabled(code,rainProbability,actualRain)", "raining=[61,63,65,66,67,80,81,82,95,96,99]", "forecastDateIsAvailable(date,today)", "start_date=${date}&end_date=${date}", "temperatureFeeling(w.max)", "תחזית עדיין לא זמינה", "function tripCalendarRange(trip)", "tripCalendarRange(t)", "function flightScheduleEvents(f)", "flightScheduleEvents(segment)", "function flightRecordMatchesEvent(f,event)", "schedule_arrival_date", "schedule_arrival_time", "schedule_arrival_hidden", "המראה", "נחיתה", "function weatherLocationForCity(city)", "41.64077,41.6306", "Asia/Tbilisi", "async function resolveWeatherLocation(stop)", "geocoding-api.open-meteo.com", "weatherLocationCache", "WEATHER_CACHE_TTL_MS=15*60*1000", "cached.fetchedAt<WEATHER_CACHE_TTL_MS", "setInterval(refreshSelectedWeather,WEATHER_CACHE_TTL_MS)", "document.addEventListener", "visibilitychange", "function destinationCoverImage", "/assets/destinations/batumi-beach.jpg", "/assets/destinations/milan.jpg", "/assets/destinations/italy-colosseum.jpg", "/assets/destinations/north-italy-venice.jpg", "#168bff", "#8a9299"):
             self.assertTrue(marker in workflow, f"deployment read-back is missing marker: {marker}")
 
 if __name__ == "__main__":
