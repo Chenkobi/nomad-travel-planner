@@ -16,6 +16,42 @@ class FrontendRegressionTests(unittest.TestCase):
             return
         subprocess.run(["node", "-e", function.group(0) + assertions], check=True, capture_output=True, text=True)
 
+    def test_travel_mode_support_shows_a_foreign_only_emergency_number(self):
+        script = r'''const fs=require('fs');
+const html=fs.readFileSync(process.argv[1],'utf8');
+const start=html.indexOf('function insuranceSupportHtml(');
+const end=html.indexOf('function renderTravelMode(',start);
+if(start<0||end<0)throw new Error('insurance support renderer not found');
+const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const render=new Function('esc',html.slice(start,end)+';return insuranceSupportHtml;')(esc);
+const output=render({insurer:'SYNTHETIC INSURER',emergency_contacts:[{label:'SYNTHETIC HOTLINE',phone_from_abroad:'+0000000000'}]});
+if(!output.includes('חיוג מחו״ל')||!output.includes('SYNTHETIC HOTLINE')||!output.includes('+0000000000')||!output.includes('tel:+0000000000'))throw new Error('foreign-only emergency contact missing: '+output);
+'''
+        subprocess.run(["node", "-e", script, str(ROOT / "index.html")], check=True, capture_output=True, text=True)
+
+    def test_insurance_card_renders_policy_details_foreign_contacts_and_page_evidence(self):
+        script = r'''const fs=require('fs');
+const html=fs.readFileSync(process.argv[1],'utf8');
+const start=html.indexOf('function updateInsuranceCard(){');
+const end=html.indexOf('let notificationItems=',start);
+if(start<0||end<0)throw new Error('insurance renderer not found');
+const source=html.slice(start,end);
+const box={innerHTML:''};
+const document={querySelector:selector=>selector==='#insuranceCard'?box:null};
+const esc=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+const activeTrip={insurance:{insurer:'SYNTHETIC INSURER',policy_number:'SYNTHETIC POLICY',coverage_summary:'SYNTHETIC SUMMARY',
+ coverage_sections:[{title:'SYNTHETIC COVER',status:'included',summary:'SYNTHETIC DETAIL',limit:'SYNTHETIC LIMIT',currency:'XXX',deductible:'SYNTHETIC DEDUCTIBLE',conditions:['SYNTHETIC CONDITION'],source_page:4,source_quote:'SYNTHETIC COVER QUOTE'}],
+ extensions:[{name:'SYNTHETIC EXTENSION',status:'selected',details:'SYNTHETIC EXTENSION DETAIL',source_page:5,source_quote:'SYNTHETIC EXTENSION QUOTE'}],
+ emergency_contacts:[{label:'SYNTHETIC HOTLINE',phone:'SYNTHETIC LOCAL',phone_from_abroad:'SYNTHETIC ABROAD',email:'support@example.invalid',whatsapp:'SYNTHETIC WHATSAPP',hours:'SYNTHETIC HOURS',source_page:2,source_quote:'SYNTHETIC CONTACT QUOTE'}],
+ claims_steps:[{step:'SYNTHETIC CLAIM STEP',deadline:'SYNTHETIC DEADLINE',source_page:6,source_quote:'SYNTHETIC CLAIM QUOTE'}],geographic_scope:[{area:'SYNTHETIC TERRITORY',status:'covered',source_page:7,source_quote:'SYNTHETIC TERRITORY QUOTE'}],document:'synthetic-policy.pdf'}};
+const API_BASE='';
+const render=new Function('document','activeTrip','esc','API_BASE',source+';return updateInsuranceCard;')(document,activeTrip,esc,API_BASE);
+render();
+for(const item of ['SYNTHETIC COVER','SYNTHETIC LIMIT','SYNTHETIC DEDUCTIBLE','SYNTHETIC CONDITION','SYNTHETIC EXTENSION','SYNTHETIC ABROAD','support@example.invalid','SYNTHETIC HOURS','SYNTHETIC CLAIM STEP','SYNTHETIC TERRITORY','SYNTHETIC COVER QUOTE','SYNTHETIC EXTENSION QUOTE','SYNTHETIC CONTACT QUOTE','SYNTHETIC CLAIM QUOTE','#page=4','#page=5','#page=2','#page=6'])if(!box.innerHTML.includes(item))throw new Error('missing insurance display item: '+item);
+'''
+        result = subprocess.run(["node", "-e", script, str(ROOT / "index.html")], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_rain_mode_requires_actual_rain_or_probability_above_50(self):
         self.run_frontend_function(
             "rainModeEnabled",
