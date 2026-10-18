@@ -30,6 +30,8 @@ env:
   DATA_DIR: /home/Kobic101/tripy-data
   UPLOADS_VOLUME: /home/Kobic101/tripy-uploads:/app/uploads
   EMAIL_VOLUME: /home/Kobic101/tripy-email:/app/email
+  EMAIL_DIR: /home/Kobic101/tripy-email
+  BACKUP_DIR: /home/Kobic101/tripy-backups
 
 jobs:
   deploy:
@@ -43,6 +45,9 @@ jobs:
 
       - name: Audit live email corpus (aggregate only)
         run: python3 tools/audit_intake_corpus.py /home/Kobic101/tripy-email
+
+      - name: Back up mutable JSON state before startup recovery
+        run: python3 tools/backup_deploy_state.py --data-dir "$DATA_DIR" --email-dir "$EMAIL_DIR" --backup-dir "$BACKUP_DIR" --run-id "$GITHUB_RUN_ID" --commit-sha "$GITHUB_SHA"
 
       - name: Build release image
         env:
