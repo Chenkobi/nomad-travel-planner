@@ -29,6 +29,11 @@ if(!output.includes('חיוג מחו״ל')||!output.includes('SYNTHETIC HOTLINE'
 '''
         subprocess.run(["node", "-e", script, str(ROOT / "index.html")], check=True, capture_output=True, text=True)
 
+    def test_deployment_live_frontend_checks_insurance_features(self):
+        workflow = (ROOT / ".github" / "workflows" / "deploy-ugreen.yml").read_text(encoding="utf-8")
+        for marker in ("function insuranceSupportHtml(insurance)", "function updateInsuranceCard()", "phone_from_abroad", "coverage_sections", "claims_steps"):
+            self.assertIn(marker, workflow)
+
     def test_insurance_card_renders_policy_details_foreign_contacts_and_page_evidence(self):
         script = r'''const fs=require('fs');
 const html=fs.readFileSync(process.argv[1],'utf8');
