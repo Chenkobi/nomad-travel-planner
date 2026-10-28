@@ -2875,7 +2875,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
     checkout_time = str(ai.get("check_out_time") or "11:00").strip()
     document_title = (f"אישור מלון · {hotel}" if hotel else "אישור הזמנה")
     address = str(ai.get("address") or ai.get("location") or "").strip()
-    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "documents": [filename], "image": image, "images": images, "destinations": destinations, "hotel": hotel, "hotels": [{"name": hotel, "city": display_cities[0] if display_cities else ai_city, "country": ai_country or (cities[0][1] if cities else ""), "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "address": address, "document": filename}], "checkin_time": checkin_time, "checkout_time": checkout_time, "document_titles": {filename: document_title}}
+    trip = {"id": datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"), "title": title, "start": start, "end": end, "days": 0, "source": source, "document": filename, "documents": [filename], "image": image, "images": images, "destinations": destinations, "hotel": hotel, "hotels": [{"name": hotel, "city": display_cities[0] if display_cities else ai_city, "country": ai_country or (cities[0][1] if cities else ""), "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "address": address, "supplier": str(ai.get("supplier") or "").strip(), "confirmation_number": str(ai.get("confirmation_number") or "").strip(), "document": filename}], "checkin_time": checkin_time, "checkout_time": checkout_time, "document_titles": {filename: document_title}}
     if start and end:
         trip["days"] = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
     if not validate_booking_trip(trip):
@@ -2903,7 +2903,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         match["images"] = list(dict.fromkeys(match.get("images", [match.get("image")] if match.get("image") else []) + [image]))
         match["image"] = match["images"][0]
         same_booking = old_start == new_start and old_end == new_end or any(h.get("start") == start and h.get("end") == end for h in (match.get("hotels") or []))
-        if same_booking:
+        if same_booking and any(_same_hotel_reservation(h, {"name": hotel, "start": start, "end": end, "confirmation_number": str(ai.get("confirmation_number") or "").strip(), "document": filename}) for h in (match.get("hotels") or [])):
             old_docs = list(match.get("documents", []))
             old_titles = match.get("document_titles", {})
             replaced_docs = []
@@ -2922,10 +2922,8 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
             match["document_titles"] = {**match.get("document_titles", {}), **trip["document_titles"]}
         booking = {"name": hotel, "city": display_cities[0] if display_cities else ai_city, "country": ai_country or (cities[0][1] if cities else ""), "start": start, "end": end, "checkin_time": checkin_time, "checkout_time": checkout_time, "address": address, "supplier": str(ai.get("supplier") or "").strip(), "confirmation_number": str(ai.get("confirmation_number") or "").strip(), "document": filename}
         existing_hotels = match.get("hotels") or ([{"name": match.get("hotel"), "start": match.get("start"), "end": match.get("end"), "checkin_time": match.get("checkin_time", "14:00"), "checkout_time": match.get("checkout_time", "11:00")} ] if match.get("hotel") else [])
-        if same_booking:
-            existing_hotels = [h for h in existing_hotels if not (h.get("start") == start and h.get("end") == end)] + [booking]
-        elif hotel:
-            existing_hotels = [h for h in existing_hotels if not (h.get("start") == start and h.get("end") == end)] + [booking]
+        if same_booking or hotel:
+            existing_hotels = [h for h in existing_hotels if not _same_hotel_reservation(h, booking)] + [booking]
         match["hotels"] = existing_hotels
         preserve_booking_metadata(match, source, status=str(ai.get("status") or "confirmed").strip().lower())
         if hotel and same_booking: match["hotel"] = hotel; match["checkin_time"] = checkin_time; match["checkout_time"] = checkout_time
@@ -2934,6 +2932,24 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         return match
     trips.insert(0, preserve_booking_metadata(trip, source, status=str(ai.get("status") or "confirmed").strip().lower())); save_trips(trips)
     return trip
+
+def _same_hotel_reservation(existing, booking):
+    """Same reservation = same confirmation number, or (when either has none) same document,
+    or same hotel and dates without any confirmation numbers. A second room or a booking from
+    another supplier at the same hotel and dates is a separate reservation."""
+    old_conf = str(existing.get("confirmation_number") or "").strip().casefold()
+    new_conf = str(booking.get("confirmation_number") or "").strip().casefold()
+    if old_conf and new_conf:
+        return old_conf == new_conf
+    if existing.get("document") and existing.get("document") == booking.get("document"):
+        return True
+    same_dates = existing.get("start") == booking.get("start") and existing.get("end") == booking.get("end")
+    if old_conf or new_conf:
+        return False
+    old_name = re.sub(r"\W+", " ", str(existing.get("name") or "")).strip().casefold()
+    new_name = re.sub(r"\W+", " ", str(booking.get("name") or "")).strip().casefold()
+    return same_dates and (not old_name or not new_name or old_name == new_name)
+
 
 def delete_trip(trip_id):
     trips = [t for t in load_trips() if str(t.get("id")) != str(trip_id)]
@@ -3300,7 +3316,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/reminders": self._json(200, {"enabled": REMINDERS_ENABLED, "last_run_at": _load_reminder_state().get("last_run_at"), "reminders": upcoming_trip_reminders(), "flight_status": {"enabled": bool(AERODATABOX_API_KEY), "calls_this_month": int(load_flight_status_state().get("calls") or 0), "monthly_limit": FLIGHT_STATUS_MONTHLY_LIMIT}}); return
         if path == "/api/notifications": self._json(200, {"notifications": load_notifications(), "unread": len(load_notifications())}); return
         if path == "/api/intake/email":
-            fields = ("id", "status", "intent", "subject", "from", "to", "reply_to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "extraction_telemetry", "provider", "provider_category_hint", "provider_confidence", "provider_evidence", "ingested_type", "trip_id", "review_reason", "attachments")
+            fields = ("id", "status", "intent", "subject", "from", "to", "reply_to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "extraction_telemetry", "provider", "provider_category_hint", "provider_confidence", "provider_evidence", "ingested_type", "trip_id", "review_reason", "attachments", "ai_error", "extraction_method", "ai_retry_count")
             emails = [{**{key: record.get(key) for key in fields}, "body_preview": re.sub(r"\\s+", " ", email_body_text(record)).strip()[:280], "raw_source": _email_raw_source(record)} for record in load_email_index()]
             self._json(200, {"emails": emails}); return
         if path == "/api/intake/telegram":
