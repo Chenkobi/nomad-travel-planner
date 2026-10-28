@@ -442,7 +442,7 @@ def load_notifications(limit=50):
         if str(record.get("id") or "") in cleared:
             continue
         status = str(record.get("status") or "").strip()
-        if status not in {"processed", "needs_review", "failed"}:
+        if status not in {"processed", "needs_review", "failed"} or (status == "needs_review" and _quiet_ai_review(record)):
             continue
         notifications.append({
             "id": str(record.get("id") or ""),
@@ -453,6 +453,7 @@ def load_notifications(limit=50):
             "processed_at": record.get("processed_at") or "",
             "review_reason": str(record.get("review_reason") or "")[:180],
             "provider": str(record.get("provider") or "")[:100],
+            "ai_error": str(record.get("ai_error") or "")[:60],
             "body_preview": re.sub(r"\s+", " ", email_body_text(record)).strip()[:280],
             "raw_source": _email_raw_source(record),
             "trip_id": record.get("trip_id"),
@@ -668,11 +669,15 @@ def upcoming_trip_reminders(now=None, limit=20, resolver=None):
 def reminder_loop():
     while True:
         try:
+            retry_failed_ai_extractions()
+        except Exception as exc:
+            print(f"AI retry cycle failed: {type(exc).__name__}", flush=True)
+        try:
             run_flight_status_cycle()
         except Exception as exc:
             print(f"Flight status cycle failed: {type(exc).__name__}", flush=True)
         try:
-            delivered = run_reminder_cycle()
+            delivered = run_reminder_cycle() if REMINDERS_ENABLED else []
             if delivered:
                 print(f"Trip reminders sent: {len(delivered)}", flush=True)
         except Exception as exc:
@@ -1121,7 +1126,7 @@ class _EmailHTMLText(HTMLParser):
     def handle_endtag(self, tag):
         if tag.lower() in {"script", "style", "head", "svg"} and self.skip_depth:
             self.skip_depth -= 1
-        elif self.skip_depth == 0 and tag.lower() in {"p", "div", "li", "tr", "h1", "h2", "h3", "h4", "section"}:
+        elif self.skip_depth == 0 and tag.lower() in {"p", "div", "li", "tr", "td", "th", "h1", "h2", "h3", "h4", "section"}:
             self.parts.append("\n")
 
     def handle_data(self, data):
@@ -1206,8 +1211,25 @@ def _unique_values(values, normalizer=lambda value: value):
 
 
 def _label_values(source, labels):
-    pattern = r"(?im)^\s*(?:" + "|".join(labels) + r")\s*[:：-]\s*(.+?)\s*$"
+    pattern = r"(?im)^[ \t\u00a0]*(?:" + "|".join(labels) + r")[ \t\u00a0]*[:：-][ \t\u00a0]*(\S.*?)[ \t\u00a0]*$"
     return _unique_values((match.group(1) for match in re.finditer(pattern, source)))
+
+
+def _parenthesized_airports(source):
+    """Airports written as 'Tel-Aviv (TLV)' / 'Milan Malpensa - Terminal 1 (MXP)', in order,
+    taken from the flight-details part of the text when there is one."""
+    text = str(source or "").replace("\u00a0", " ")
+    anchor = re.search(r"(?i)departs?\s+from|departure airport|flight details|פרטי טיסה|מוצא", text)
+    window = text[anchor.start():anchor.start() + 1500] if anchor else text
+    found = []
+    for match in re.finditer(r"([A-Za-z\u00C0-\u024F\u0590-\u05FF][^\n()]{0,60}?)?[ \t]*\n?[ \t]*\(([A-Z]{3})\)", window):
+        name = re.sub(r"\s+", " ", (match.group(1) or "")).strip(" -–:")
+        if re.search(r"(?i)departs?\s+from|arrives?\s+to|^from$|^to$", name):
+            name = ""
+        code = match.group(2)
+        if code not in {c for _, c in found}:
+            found.append((f"{name} ({code})" if name else code, code))
+    return found
 
 
 def _normalize_flight_number(value):
@@ -1294,7 +1316,7 @@ def normalize_flight_fields(ai, text=""):
         result["origin"] = ""
         result["destination"] = ""
     route_source = "\n".join(line for line in raw_lines if not all(marker in line.casefold() for marker in ("from", "to", "flight", "departure", "arrival")))
-    route_pairs = re.findall(r"(?im)^\s*([A-Za-z][A-Za-z .'-]{1,30}?)\s+(?:to|→)\s+([A-Za-z][A-Za-z .'-]{1,30}?)\s*$", route_source)
+    route_pairs = re.findall(r"(?im)^[ \t]*([A-Za-z][A-Za-z .'-]{1,30}?)[ \t]+(?:to|→)[ \t]+([A-Za-z][A-Za-z .'-]{1,30}?)[ \t]*$", route_source)
     route_pairs = _unique_values((f"{a.strip()} → {b.strip()}" for a, b in route_pairs), str.casefold)
     if len(route_pairs) == 1 and (not result.get("origin") or not result.get("destination")):
         origin, destination = route_pairs[0].split(" → ", 1)
@@ -1397,6 +1419,12 @@ def normalize_flight_fields(ai, text=""):
             if prefix.casefold().startswith(origin.casefold() + " "):
                 result["destination"] = prefix[len(origin):].strip()
             break
+
+    if not result.get("origin") or not result.get("destination"):
+        airports = _parenthesized_airports(source)
+        if len(airports) >= 2 and airports[0][1] != airports[1][1]:
+            result["origin"] = result.get("origin") or airports[0][0]
+            result["destination"] = result.get("destination") or airports[1][0]
 
     set_if_missing("departure_date", _label_values(source, ("departure date", "date", "תאריך יציאה")), _normalize_explicit_date)
     if not normalize_date_value(result.get("departure_date")):
@@ -2031,6 +2059,75 @@ def find_email_trip(filename):
     return None
 
 
+AI_RETRY_LIMIT = 3
+AI_RETRY_BASE_SECONDS = 10 * 60
+
+
+def deterministic_booking_extraction(subject, body, provider_info=None):
+    """Booking facts read straight from the email text, used when the AI step fails.
+    Returns {} unless the facts are complete enough to save without guessing."""
+    provider_info = provider_info or {}
+    intent = classify_email_intent(subject, body)
+    if intent not in {"confirmed", "modified"}:
+        return {}
+    text = str(body or "")
+    hint = str(provider_info.get("category_hint") or "").strip()
+    if hint in {"unknown", "other", "marketplace"}:
+        hint = ""
+    lowered = text.casefold()
+    confirmation = next(iter(_label_values(text, ("confirmation code", "flight confirmation code", "booking reference",
+                                                    "booking number", "reservation number", "confirmation number", "מספר הזמנה"))), "")
+    base = {"status": intent, "_extraction": "text_fallback"}
+    if confirmation:
+        base["confirmation_number"] = confirmation[:40]
+    if hint == "flight" or (not hint and re.search(r"(?i)flight number|boarding|מספר טיסה", text)):
+        flight = normalize_flight_fields({}, text)
+        required = ("flight_number", "origin", "destination", "departure_date", "departure_time")
+        if all(str(flight.get(key) or "").strip() for key in required) and normalize_date_value(flight.get("departure_date")):
+            keys = ("airline", "flight_number", "origin", "destination", "departure_date", "departure_time", "arrival_date", "arrival_time")
+            return {**base, "type": "flight", **{key: flight.get(key) for key in keys if flight.get(key)}}
+    if hint == "car_rental" or (not hint and ("car rental" in lowered or "pick-up" in lowered or "השכרת רכב" in lowered)):
+        rental = normalize_car_rental_fields({}, text)
+        if all(str(rental.get(key) or "").strip() for key in ("pickup_date", "pickup_time", "pickup_location", "vehicle_type")):
+            keys = ("pickup_date", "pickup_time", "pickup_location", "vehicle_type", "dropoff_date", "dropoff_time", "dropoff_location")
+            return {**base, "type": "car_rental", **{key: rental.get(key) for key in keys if rental.get(key)}}
+    hotel = understand_hotel_reservation(body=text)
+    if hotel.get("intent") == "reservation" and hotel.get("decision") == "accept":
+        facts = hotel.get("facts") or {}
+        value = lambda key: str(((facts.get(key) or {}).get("value")) or "").strip()
+        if value("hotel") and value("check_in") and value("check_out"):
+            return {**base, "type": "hotel", "hotel": value("hotel"), "city": value("city"),
+                    "check_in": value("check_in"), "check_out": value("check_out")}
+    return {}
+
+
+def retry_failed_ai_extractions(now=None, limit=2):
+    """Re-run emails whose AI step failed, with backoff; the push only goes out after the last try."""
+    now = now or _utc_now()
+    retried = []
+    for record in load_email_index():
+        if len(retried) >= limit:
+            break
+        if record.get("status") != "needs_review" or record.get("review_reason") != "ai_extraction_failed":
+            continue
+        attempts = int(record.get("ai_retry_count") or 0)
+        if attempts >= AI_RETRY_LIMIT:
+            continue
+        last = _parse_timestamp(record.get("processed_at"))
+        if last and (now - last).total_seconds() < AI_RETRY_BASE_SECONDS * (2 ** attempts):
+            continue
+        intake_id = record.get("id")
+        update_email_record(intake_id, status="received", ai_retry_count=attempts + 1, previous_review_reason="ai_extraction_failed", processing_error="")
+        process_incoming_email({**record, "status": "received", "ai_retry_count": attempts + 1})
+        retried.append(intake_id)
+    return retried
+
+
+def _quiet_ai_review(record):
+    return (record.get("review_reason") == "ai_extraction_failed"
+            and int(record.get("ai_retry_count") or 0) < AI_RETRY_LIMIT)
+
+
 def process_incoming_email(record):
     """Process one persisted MIME record under a crash-recoverable lease."""
     intake_id = record.get("id")
@@ -2104,6 +2201,12 @@ def process_incoming_email(record):
         ))
         supplemental_context = "\n".join(part for part in (body[:30000], attachment_context) if part)
         ai = gemini_extract(path, mime_type=mime_type, supplemental_text=supplemental_context, provider_info=provider_info) or {}
+        ai_error = "" if ai else last_gemini_error()
+        if not ai:
+            ai = deterministic_booking_extraction(subject, "\n".join((body, attachment_context_for_provider)), provider_info)
+            update_email_record(intake_id, ai_error=ai_error, extraction_method="text_fallback" if ai else "none")
+        else:
+            update_email_record(intake_id, ai_error="", extraction_method="ai")
         if ai:
             ai = enrich_ai_with_provider(ai, provider_info)
             if str(provider_info.get("provider") or "").strip().casefold() != "unknown":
@@ -2121,7 +2224,7 @@ def process_incoming_email(record):
             final_record_status = "needs_review"
             validation_error_code = "provider_unavailable"
             update_email_record(intake_id, status="needs_review", intent="unknown", review_reason="ai_extraction_failed", processed_at=_utc_now().isoformat())
-            if TOKEN and ALLOWED_CHAT:
+            if int(record.get("ai_retry_count") or 0) >= AI_RETRY_LIMIT and TOKEN and ALLOWED_CHAT:
                 send(ALLOWED_CHAT, email_notification("unknown", record, review=True))
             return record
         provider_hint = str(provider_info.get("category_hint") or "").strip()
@@ -2223,7 +2326,8 @@ def process_incoming_email(record):
             validation_error_field=validation_error_field,
             persistence_outcome=persistence_outcome,
         )
-        if final_record_status in {"processed", "needs_review", "failed"}:
+        quiet = validation_error_code == "provider_unavailable" and int(record.get("ai_retry_count") or 0) < AI_RETRY_LIMIT
+        if final_record_status in {"processed", "needs_review", "failed"} and not quiet:
             label = "TRIPY: הזמנה נקלטה" if final_record_status == "processed" else "TRIPY: נדרשת בדיקה"
             send_push_notification(label, str(record.get("subject") or "מייל נסיעות"), tag=f"tripy-{intake_id}")
 def repair_trip_titles_from_bookings():
@@ -2406,8 +2510,18 @@ def gemini_prompt_context(provider_info=None):
     return context
 
 
+_GEMINI_STATE = threading.local()
+
+
+def last_gemini_error():
+    return getattr(_GEMINI_STATE, "error", "") or ""
+
+
 def gemini_extract(path, mime_type=None, supplemental_text="", provider_info=None):
-    if not GEMINI_API_KEY: return None
+    _GEMINI_STATE.error = ""
+    if not GEMINI_API_KEY:
+        _GEMINI_STATE.error = "gemini_key_missing"
+        return None
     schema = {"type":"object","properties":{"type":{"type":"string","enum":["hotel","flight","train","attraction","car_rental","restaurant","insurance","other"]},"hotel":{"type":"string"},"city":{"type":"string"},"country":{"type":"string"},"check_in":{"type":"string"},"check_out":{"type":"string"},"check_in_time":{"type":"string"},"check_out_time":{"type":"string"},"airline":{"type":"string"},"flight_number":{"type":"string"},"segments":{"type":"array","items":{"type":"object","properties":{"airline":{"type":"string"},"flight_number":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"departure_terminal":{"type":"string"},"arrival_terminal":{"type":"string"}}}},"departure_terminal":{"type":"string"},"arrival_terminal":{"type":"string"},"departure_date":{"type":"string"},"departure_time":{"type":"string"},"arrival_date":{"type":"string"},"arrival_time":{"type":"string"},"origin":{"type":"string"},"destination":{"type":"string"},"train_number":{"type":"string"},"attraction":{"type":"string"},"restaurant_name":{"type":"string"},"date":{"type":"string"},"time":{"type":"string"},"location":{"type":"string"},"address":{"type":"string"},"phone":{"type":"string"},"pickup_date":{"type":"string"},"pickup_time":{"type":"string"},"pickup_location":{"type":"string"},"vehicle_type":{"type":"string"},"dropoff_date":{"type":"string"},"dropoff_time":{"type":"string"},"dropoff_location":{"type":"string"},"supplier":{"type":"string"},"confirmation_number":{"type":"string"},"traveler":{"type":"string"},**insurance_schema_properties(),"status":{"type":"string","enum":["confirmed","modified","cancelled","refunded","unknown"]}},"required":["type","status"]}
     prompt = "Classify this travel document, email or screenshot and extract only clearly present facts. Return JSON matching the schema. type must be hotel, flight, train, attraction, car_rental, restaurant, insurance, or other. For every date field, return ISO YYYY-MM-DD only; for every time field, return 24-hour HH:MM only; if the source does not state a fact unambiguously, return an empty string. status must describe the lifecycle of this booking message: confirmed for a new/active reservation, modified only when the reservation dates, route, room, passenger, or other booking facts were actually changed, cancelled only when the reservation itself was cancelled, and refunded only when a refund was actually issued. Do not infer modified or cancelled from generic footer text, a cancellation policy, refund policy, last-updated timestamps, account links, or instructions to update preferences. Never guess; use empty strings or empty arrays when a fact is absent. A flight requires airline, flight_number, origin, destination, departure_date, departure_time, and arrival_time when clearly present. Return departure_terminal and arrival_terminal only when the document states the terminal (e.g. \"3\" or \"1\"). A car rental requires pickup_date, pickup_time, pickup_location, and vehicle_type; preserve dropoff fields when clearly present. A restaurant reservation must include restaurant_name, date and time, and address/phone when clearly present. A booking confirmation for a museum, chocolate experience, tour, venue, or ticketed visit is an attraction, never a hotel. Insurance is one trip-level policy; preserve only source facts and keep the original document as the source of truth. Do not invent coverage, exclusions, phone numbers, or medical advice."
     prompt += insurance_extraction_instructions() + gemini_prompt_context(provider_info)
@@ -2434,9 +2548,11 @@ def gemini_extract(path, mime_type=None, supplemental_text="", provider_info=Non
             if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
                 time.sleep(2 ** attempt); continue
             print("Gemini extraction HTTP error:", exc.code, flush=True)
+            _GEMINI_STATE.error = f"gemini_http_{exc.code}"
             return None
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             print("Gemini extraction error:", type(exc).__name__, flush=True)
+            _GEMINI_STATE.error = f"gemini_{type(exc).__name__.lower()}"
             return None
 
 
@@ -2707,7 +2823,7 @@ def create_trip_from_document(filename, path, source="Telegram", ai_override=Non
         raise ValueError("hotel document missing unambiguous lodging facts")
     start, end = validate_date_range(start, end)
     display_cities = list(dict.fromkeys((city_labels.get(x[0]) or x[0]) for x in cities))
-    title = (" · ".join(dict.fromkeys(x[1] for x in cities))) or Path(filename).stem or "טיול חדש"
+    title = (" · ".join(dict.fromkeys(x[1] for x in cities))) or str(ai.get("city") or "").strip() or (f"מלון {str(ai.get('hotel') or '').strip()}" if str(ai.get("hotel") or "").strip() else "") or "טיול חדש"
     title = title.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט").replace("Budapest", "בודפשט")
     image_by_city = {"מינכן": "https://images.unsplash.com/photo-1595867818082-083862f3d630?auto=format&fit=crop&w=1200&q=80", "פרנקפורט": "https://images.unsplash.com/photo-1520699049698-acd2fccb8cc8?auto=format&fit=crop&w=1200&q=80"}
     images = list(dict.fromkeys(image_by_city.get(city.replace("Munich", "מינכן").replace("München", "מינכן").replace("Frankfurt", "פרנקפורט"), "https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80") for city, _ in cities)) or ["https://images.unsplash.com/photo-1527668752968-14dc70a27c95?auto=format&fit=crop&w=1200&q=80"]
@@ -3459,8 +3575,7 @@ def main():
     EMAIL_READY = bool(EMAIL_INTAKE_SECRET)
     resume_pending_email_processing()
     threading.Thread(target=start_telegram_polling, daemon=True).start()
-    if REMINDERS_ENABLED:
-        threading.Thread(target=reminder_loop, daemon=True).start()
+    threading.Thread(target=reminder_loop, daemon=True).start()
     print(f"TRIPY bot/API listening on http://127.0.0.1:{PORT}", flush=True)
     httpd.serve_forever()
 
