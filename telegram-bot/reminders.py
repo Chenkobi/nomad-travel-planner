@@ -190,6 +190,14 @@ def _quiet(moment: datetime) -> bool:
     return clock >= QUIET_START or clock < QUIET_END
 
 
+def _parse_utc(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(_text(value))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def _active(booking: Any) -> bool:
     return isinstance(booking, dict) and _text(booking.get("status") or "confirmed").casefold() not in INACTIVE_STATUSES
 
@@ -222,8 +230,11 @@ def _trip_zone(trip: dict, resolver: TimezoneResolver) -> str:
     return resolver.place(*places, trip.get("title")) or resolver.default
 
 
-def build_reminders(trips: Iterable[dict], resolver: TimezoneResolver) -> list[dict]:
-    """Every reminder implied by the active bookings, past and future."""
+def build_reminders(trips: Iterable[dict], resolver: TimezoneResolver,
+                    live_status: Callable[[dict], dict | None] | None = None) -> list[dict]:
+    """Every reminder implied by the active bookings, past and future. live_status, when
+    given, returns a flight's live summary so cancelled flights are skipped and the
+    leave-for-airport reminder follows a delay."""
     reminders: list[dict | None] = []
     for trip in trips or []:
         if not isinstance(trip, dict):
@@ -240,14 +251,25 @@ def build_reminders(trips: Iterable[dict], resolver: TimezoneResolver) -> list[d
             dep = local_moment(flight.get("departure_date"), flight.get("departure_time"), zone)
             if dep is None:
                 continue
+            live = (live_status(flight) if live_status else None) or {}
+            if live.get("cancelled"):
+                continue
+            leave_from = dep
+            estimated = _parse_utc(live.get("departure_estimated_utc"))
+            if estimated and int(live.get("delay_minutes") or 0) >= 15:
+                leave_from = estimated.astimezone(ZoneInfo(zone))
             number = _text(flight.get("number") or flight.get("flight_number"))
             route = f"{origin} → {_text(flight.get('destination'))}"
             hhmm = dep.strftime("%H:%M")
             base = f"flight:{trip_id}:{number}:{dep.isoformat()}"
             reminders.append(_reminder(base + ":checkin", dep - timedelta(hours=24), "✈️ טיסה מחר · אפשר לעשות צ׳ק-אין",
                                        _join(f"{_text(flight.get('airline'))} {number}".strip(), route, f"המראה ב-{hhmm}", _conf(flight))))
-            reminders.append(_reminder(base + ":leave", dep - timedelta(hours=4), f"✈️ טיסה ב-{hhmm} · זמן לצאת לשדה",
-                                       _join(number, route, "כדאי להיות בשדה כשלוש שעות לפני ההמראה"), relative=True))
+            delayed = leave_from != dep
+            leave_key = base + ":leave" + (f":{leave_from.isoformat()}" if delayed else "")
+            reminders.append(_reminder(leave_key, leave_from - timedelta(hours=4),
+                                       f"✈️ טיסה ב-{leave_from.strftime('%H:%M')} · זמן לצאת לשדה",
+                                       _join(number, route, f"מתעכבת, במקור {hhmm}" if delayed else "",
+                                             "כדאי להיות בשדה כשלוש שעות לפני ההמראה"), relative=True))
             agenda.append((dep, f"{hhmm} טיסה {number}"))
 
         for hotel in trip.get("hotels") or []:

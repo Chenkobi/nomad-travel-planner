@@ -54,6 +54,7 @@ from event_contract import event_as_legacy_list, event_identity
 from email_rules import _strong_confirmation_subject, classify_email_intent, looks_like_travel_email
 from provider_rules import enrich_ai_with_provider, identify_email_provider
 import reminders as trip_reminders
+import flight_status as live_flights
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.getenv("TRIPY_DATA_FILE", ROOT / "trip-data.json"))
@@ -95,6 +96,9 @@ REMINDERS_ENABLED = os.getenv("TRIPY_REMINDERS_ENABLED", "1").strip() != "0"
 REMINDER_INTERVAL_SECONDS = max(30, int(os.getenv("TRIPY_REMINDER_INTERVAL_SECONDS", "120")))
 REMINDER_DEFAULT_TZ = os.getenv("TRIPY_DEFAULT_TIMEZONE", trip_reminders.DEFAULT_TIMEZONE).strip()
 REMINDER_LOCK = threading.Lock()
+FLIGHT_STATUS_STATE = Path(os.getenv("TRIPY_FLIGHT_STATUS_STATE_FILE", EMAIL_DIR / "flight-status.json"))
+AERODATABOX_API_KEY = os.getenv("AERODATABOX_RAPIDAPI_KEY", "").strip()
+FLIGHT_STATUS_MONTHLY_LIMIT = max(0, int(os.getenv("TRIPY_FLIGHT_STATUS_MONTHLY_LIMIT", "250")))
 MAX_PROCESSING_STAGE = 64
 MAX_PROCESSING_ERROR = 256
 MAX_STAGE_HISTORY = 12
@@ -587,13 +591,65 @@ def _load_reminder_state():
         return {}
 
 
+def load_flight_status_state():
+    try:
+        value = json.loads(FLIGHT_STATUS_STATE.read_text(encoding="utf-8")) if FLIGHT_STATUS_STATE.exists() else {}
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _flight_departure_utc(resolver):
+    def departure(flight):
+        origin = str(flight.get("origin") or "")
+        zone = resolver.airport(origin) or resolver.place(origin) or resolver.default
+        moment = trip_reminders.local_moment(flight.get("departure_date"), flight.get("departure_time"), zone)
+        return moment.astimezone(timezone.utc) if moment else None
+    return departure
+
+
+def run_flight_status_cycle(now=None, client=None, resolver=None, sender=None):
+    """Poll live status for flights close to departure and push what changed."""
+    if client is None:
+        if not AERODATABOX_API_KEY:
+            return None
+        client = live_flights.AeroDataBoxClient(AERODATABOX_API_KEY)
+    now = now or datetime.now(timezone.utc)
+    sender = sender or send_push_notification
+    with REMINDER_LOCK:
+        state = live_flights.run_flight_status_cycle(
+            load_trips(), load_flight_status_state(), now, client,
+            _flight_departure_utc(resolver or _reminder_resolver()),
+            lambda title, body, tag: sender(title, body, tag=tag), FLIGHT_STATUS_MONTHLY_LIMIT)
+        _save_json_private(FLIGHT_STATUS_STATE, state)
+        return state
+
+
+def _live_status_lookup():
+    state = load_flight_status_state()
+    return lambda flight: live_flights.live_status_for(state, flight)
+
+
+def attach_live_flight_status(trips):
+    lookup = _live_status_lookup()
+    for trip in trips or []:
+        for flight in (trip.get("flights") or []) if isinstance(trip, dict) else []:
+            if isinstance(flight, dict):
+                status = lookup(flight)
+                if status:
+                    flight["live_status"] = status
+                else:
+                    flight.pop("live_status", None)
+    return trips
+
+
 def run_reminder_cycle(now=None, resolver=None, sender=None):
     """Send each scheduled trip reminder whose time has come, at most once."""
     now = now or datetime.now(timezone.utc)
     sender = sender or send_push_notification
     with REMINDER_LOCK:
         sent = trip_reminders.prune_sent(_load_reminder_state().get("sent"), now)
-        planned = trip_reminders.build_reminders(load_trips(), resolver or _reminder_resolver())
+        planned = trip_reminders.build_reminders(load_trips(), resolver or _reminder_resolver(), _live_status_lookup())
         delivered = []
         for reminder in trip_reminders.due_reminders(planned, now, sent):
             if sender(reminder["title"], reminder["body"], tag=reminder["tag"]):
@@ -605,12 +661,16 @@ def run_reminder_cycle(now=None, resolver=None, sender=None):
 
 def upcoming_trip_reminders(now=None, limit=20, resolver=None):
     now = now or datetime.now(timezone.utc)
-    planned = trip_reminders.build_reminders(load_trips(), resolver or _reminder_resolver())
+    planned = trip_reminders.build_reminders(load_trips(), resolver or _reminder_resolver(), _live_status_lookup())
     return trip_reminders.upcoming_reminders(planned, now, limit)
 
 
 def reminder_loop():
     while True:
+        try:
+            run_flight_status_cycle()
+        except Exception as exc:
+            print(f"Flight status cycle failed: {type(exc).__name__}", flush=True)
         try:
             delivered = run_reminder_cycle()
             if delivered:
@@ -3076,9 +3136,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(502, {"error":"rates_unavailable"}); return
             self._json(200, payload); return
         if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
-        if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": hydrate_booking_sources(load_trips())}); return
+        if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": attach_live_flight_status(hydrate_booking_sources(load_trips()))}); return
         if path == "/api/push/vapid-public-key": self._json(200, {"public_key": vapid_public_key()}); return
-        if path == "/api/reminders": self._json(200, {"enabled": REMINDERS_ENABLED, "last_run_at": _load_reminder_state().get("last_run_at"), "reminders": upcoming_trip_reminders()}); return
+        if path == "/api/reminders": self._json(200, {"enabled": REMINDERS_ENABLED, "last_run_at": _load_reminder_state().get("last_run_at"), "reminders": upcoming_trip_reminders(), "flight_status": {"enabled": bool(AERODATABOX_API_KEY), "calls_this_month": int(load_flight_status_state().get("calls") or 0), "monthly_limit": FLIGHT_STATUS_MONTHLY_LIMIT}}); return
         if path == "/api/notifications": self._json(200, {"notifications": load_notifications(), "unread": len(load_notifications())}); return
         if path == "/api/intake/email":
             fields = ("id", "status", "intent", "subject", "from", "to", "reply_to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "extraction_telemetry", "provider", "provider_category_hint", "provider_confidence", "provider_evidence", "ingested_type", "trip_id", "review_reason", "attachments")

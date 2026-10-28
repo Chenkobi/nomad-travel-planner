@@ -18,6 +18,7 @@ COPY telegram-bot/booking_facts.py /app/telegram-bot/booking_facts.py
 COPY telegram-bot/semantic_hotel.py /app/telegram-bot/semantic_hotel.py
 COPY telegram-bot/event_contract.py /app/telegram-bot/event_contract.py
 COPY telegram-bot/reminders.py /app/telegram-bot/reminders.py
+COPY telegram-bot/flight_status.py /app/telegram-bot/flight_status.py
 COPY tools/audit_intake_corpus.py /app/tools/audit_intake_corpus.py
 RUN mkdir -p /app/trip-uploads
 ENV PORT=8787
