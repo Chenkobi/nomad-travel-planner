@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils tesseract-ocr tesseract-ocr-heb && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir pywebpush==2.1.2 webauthn==2.7.0
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates poppler-utils tesseract-ocr tesseract-ocr-heb && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir pywebpush==2.1.2 webauthn==2.7.0 tzdata "certifi>=2026.10.19"
 COPY index.html /app/index.html
 COPY assets/rain-window.jpg /app/assets/rain-window.jpg
 COPY assets/destinations/ /app/assets/destinations/
@@ -17,6 +17,7 @@ COPY telegram-bot/booking_extraction.py /app/telegram-bot/booking_extraction.py
 COPY telegram-bot/booking_facts.py /app/telegram-bot/booking_facts.py
 COPY telegram-bot/semantic_hotel.py /app/telegram-bot/semantic_hotel.py
 COPY telegram-bot/event_contract.py /app/telegram-bot/event_contract.py
+COPY telegram-bot/reminders.py /app/telegram-bot/reminders.py
 COPY tools/audit_intake_corpus.py /app/tools/audit_intake_corpus.py
 RUN mkdir -p /app/trip-uploads
 ENV PORT=8787

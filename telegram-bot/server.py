@@ -53,6 +53,7 @@ from semantic_hotel import understand_hotel_reservation
 from event_contract import event_as_legacy_list, event_identity
 from email_rules import _strong_confirmation_subject, classify_email_intent, looks_like_travel_email
 from provider_rules import enrich_ai_with_provider, identify_email_provider
+import reminders as trip_reminders
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.getenv("TRIPY_DATA_FILE", ROOT / "trip-data.json"))
@@ -88,6 +89,12 @@ VAPID_SUBJECT = os.getenv("TRIPY_VAPID_SUBJECT", "mailto:trippy@atlasim.co.il").
 EMAIL_PROCESSING_LEASE_SECONDS = int(os.getenv("TRIPY_EMAIL_PROCESSING_LEASE_SECONDS", "900"))
 TELEGRAM_STARTUP_RETRIES = max(1, int(os.getenv("TRIPY_TELEGRAM_STARTUP_RETRIES", "3")))
 TELEGRAM_RETRY_DELAY_SECONDS = max(0, float(os.getenv("TRIPY_TELEGRAM_RETRY_DELAY_SECONDS", "5")))
+REMINDER_STATE = Path(os.getenv("TRIPY_REMINDER_STATE_FILE", EMAIL_DIR / "reminder-state.json"))
+REMINDER_TZ_CACHE = Path(os.getenv("TRIPY_REMINDER_TZ_CACHE_FILE", EMAIL_DIR / "reminder-timezones.json"))
+REMINDERS_ENABLED = os.getenv("TRIPY_REMINDERS_ENABLED", "1").strip() != "0"
+REMINDER_INTERVAL_SECONDS = max(30, int(os.getenv("TRIPY_REMINDER_INTERVAL_SECONDS", "120")))
+REMINDER_DEFAULT_TZ = os.getenv("TRIPY_DEFAULT_TIMEZONE", trip_reminders.DEFAULT_TIMEZONE).strip()
+REMINDER_LOCK = threading.Lock()
 MAX_PROCESSING_STAGE = 64
 MAX_PROCESSING_ERROR = 256
 MAX_STAGE_HISTORY = 12
@@ -568,6 +575,83 @@ def send_push_notification(title, body, tag="tripy-booking", details=False):
         _save_json_private(PUSH_SUBSCRIPTIONS, [item for item in _load_json_list(PUSH_SUBSCRIPTIONS) if item.get("endpoint") not in stale])
     result.update({"sent": delivered, "failures": sorted(set(failures)), "stale_removed": len(stale)})
     return result if details else delivered
+def _reminder_resolver():
+    return trip_reminders.TimezoneResolver(REMINDER_TZ_CACHE, geocode=trip_reminders.open_meteo_geocode, default=REMINDER_DEFAULT_TZ)
+
+
+def _load_reminder_state():
+    try:
+        value = json.loads(REMINDER_STATE.read_text(encoding="utf-8")) if REMINDER_STATE.exists() else {}
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def run_reminder_cycle(now=None, resolver=None, sender=None):
+    """Send each scheduled trip reminder whose time has come, at most once."""
+    now = now or datetime.now(timezone.utc)
+    sender = sender or send_push_notification
+    with REMINDER_LOCK:
+        sent = trip_reminders.prune_sent(_load_reminder_state().get("sent"), now)
+        planned = trip_reminders.build_reminders(load_trips(), resolver or _reminder_resolver())
+        delivered = []
+        for reminder in trip_reminders.due_reminders(planned, now, sent):
+            if sender(reminder["title"], reminder["body"], tag=reminder["tag"]):
+                sent[reminder["id"]] = now.isoformat()
+                delivered.append(reminder["id"])
+        _save_json_private(REMINDER_STATE, {"sent": sent, "last_run_at": now.isoformat()})
+        return delivered
+
+
+def upcoming_trip_reminders(now=None, limit=20, resolver=None):
+    now = now or datetime.now(timezone.utc)
+    planned = trip_reminders.build_reminders(load_trips(), resolver or _reminder_resolver())
+    return trip_reminders.upcoming_reminders(planned, now, limit)
+
+
+def reminder_loop():
+    while True:
+        try:
+            delivered = run_reminder_cycle()
+            if delivered:
+                print(f"Trip reminders sent: {len(delivered)}", flush=True)
+        except Exception as exc:
+            print(f"Trip reminder cycle failed: {type(exc).__name__}", flush=True)
+        time.sleep(REMINDER_INTERVAL_SECONDS)
+
+
+RATES_CACHE = {"fetched_at": 0.0, "payload": None}
+RATES_TTL_SECONDS = 60 * 60
+RATES_LOCK = threading.Lock()
+
+
+def fetch_currency_rates():
+    request = urllib.request.Request("https://api.frankfurter.dev/v2/rates?base=ILS&quotes=USD,GBP,EUR,CHF,CAD,AUD,JPY,HUF,INR,PLN,CZK,TRY,RON,BGN,AED,GEL", headers={"Accept":"application/json", "User-Agent":"TRIPY/1.0"})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        raw_rates = json.loads(response.read())
+    if not isinstance(raw_rates, list) or not raw_rates:
+        raise ValueError("empty_rates")
+    normalized = {str(row["quote"]): 1 / float(row["rate"]) for row in raw_rates if row.get("quote") and float(row.get("rate", 0)) > 0}
+    if not normalized:
+        raise ValueError("empty_rates")
+    return {"base":"ILS", "date":str(raw_rates[0].get("date") or ""), "rates":normalized, "source":"Frankfurter"}
+
+
+def currency_rates(now=None, fetcher=None):
+    """Daily rates, cached for an hour; the last good answer is served (marked stale) when the provider fails."""
+    now = time.time() if now is None else now
+    with RATES_LOCK:
+        cached = RATES_CACHE["payload"]
+        if cached and now - RATES_CACHE["fetched_at"] < RATES_TTL_SECONDS:
+            return cached
+        try:
+            payload = (fetcher or fetch_currency_rates)()
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return {**cached, "stale": True} if cached else None
+        RATES_CACHE.update({"fetched_at": now, "payload": payload})
+        return payload
+
+
 def save_email_index(items):
     EMAIL_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=EMAIL_DIR, prefix=".index.", suffix=".tmp", encoding="utf-8", delete=False) as handle:
@@ -2987,17 +3071,14 @@ class Handler(BaseHTTPRequestHandler):
             _save_share_records(records)
             self._json(200, {"trip": trip}, cookies=[_session_header(session, share=True)]); return
         if path == "/api/rates":
-            try:
-                request = urllib.request.Request("https://api.frankfurter.dev/v2/rates?base=ILS&quotes=USD,GBP,EUR,CHF,CAD,AUD,JPY,HUF,INR,PLN,CZK,TRY,RON,BGN,AED,GEL", headers={"Accept":"application/json", "User-Agent":"TRIPY/1.0"})
-                with urllib.request.urlopen(request, timeout=15) as response: raw_rates = json.loads(response.read())
-                if not isinstance(raw_rates, list) or not raw_rates: raise ValueError("empty_rates")
-                normalized = {str(row["quote"]): 1 / float(row["rate"]) for row in raw_rates if row.get("quote") and float(row.get("rate", 0)) > 0}
-                self._json(200, {"base":"ILS", "date":str(raw_rates[0].get("date") or ""), "rates":normalized, "source":"Frankfurter"}); return
-            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            payload = currency_rates()
+            if payload is None:
                 self._json(502, {"error":"rates_unavailable"}); return
+            self._json(200, payload); return
         if path == "/api/events": self._json(200, {"events": ensure_hotel_events()}); return
         if path == "/api/trips": ensure_hotel_events(); self._json(200, {"trips": hydrate_booking_sources(load_trips())}); return
         if path == "/api/push/vapid-public-key": self._json(200, {"public_key": vapid_public_key()}); return
+        if path == "/api/reminders": self._json(200, {"enabled": REMINDERS_ENABLED, "last_run_at": _load_reminder_state().get("last_run_at"), "reminders": upcoming_trip_reminders()}); return
         if path == "/api/notifications": self._json(200, {"notifications": load_notifications(), "unread": len(load_notifications())}); return
         if path == "/api/intake/email":
             fields = ("id", "status", "intent", "subject", "from", "to", "reply_to", "date", "received_at", "processed_at", "processing_started_at", "processing_attempts", "processing_stage", "processing_stage_updated_at", "processing_stage_history", "processing_error", "extraction_telemetry", "provider", "provider_category_hint", "provider_confidence", "provider_evidence", "ingested_type", "trip_id", "review_reason", "attachments")
@@ -3318,6 +3399,8 @@ def main():
     EMAIL_READY = bool(EMAIL_INTAKE_SECRET)
     resume_pending_email_processing()
     threading.Thread(target=start_telegram_polling, daemon=True).start()
+    if REMINDERS_ENABLED:
+        threading.Thread(target=reminder_loop, daemon=True).start()
     print(f"TRIPY bot/API listening on http://127.0.0.1:{PORT}", flush=True)
     httpd.serve_forever()
 
