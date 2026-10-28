@@ -1,0 +1,23 @@
+From: "noreply@wizzair.com" <noreply@wizzair.com>
+To: trips@example.test
+Subject: Your travel itinerary: ZZTEST
+Message-ID: <wizz-itinerary-fixture@example.test>
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+<html><body><p>&#9992; Wizz Air</p><table>
+<tr><td>Flight confirmation code:</td><td>ZZTEST</td></tr>
+<tr><td>Passenger info</td></tr><tr><td>MR</td><td>Test</td><td>Traveler</td>=
+<td>TLV-MXP</td></tr>
+<tr><td><b>Flight details</b></td></tr>
+<tr><td>GOING OUT</td></tr>
+<tr><td>Flight Number: W4&nbsp;6406</td></tr>
+<tr><td>Departs from:</td><td>Arrives to:</td></tr>
+<tr><td>Tel-Aviv<br>&nbsp;(TLV)</td><td>Milan Malpensa - Terminal 1&nbsp;(MXP=
+)</td></tr>
+<tr><td>10/12/2026&nbsp;10:50</td><td>10/12/2026&nbsp;14:15</td></tr>
+<tr><td>YOU ARE PROTECTED</td></tr>
+<tr><td>NEED HELP?</td></tr><tr><td>Browse our FAQ</td></tr><tr><td>to get in=
+stant answers</td></tr>
+</table></body></html>
