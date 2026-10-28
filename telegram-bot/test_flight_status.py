@@ -242,3 +242,26 @@ class DeploymentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScheduleUiTests(unittest.TestCase):
+    def setUp(self):
+        self.index = (ROOT / "index.html").read_text(encoding="utf-8")
+
+    def test_edit_modal_closes_from_button_backdrop_and_escape(self):
+        self.assertIn('getElementById("closeDetailModal")?.addEventListener("click"', self.index)
+        self.assertIn('classList.contains("modal-back")&&back.classList.contains("show")', self.index)
+        self.assertIn('e.key==="Escape"', self.index)
+        self.assertIn('m.id!=="authOverlay"', self.index)
+
+    def test_departure_row_has_time_terminal_and_airport_navigation(self):
+        self.assertIn("function flightAirportPlace(place,terminal)", self.index)
+        self.assertIn("TLV:'נמל התעופה בן גוריון'", self.index)
+        self.assertIn("'המראה '+departureTime", self.index)
+        self.assertIn("🧭 ניווט לשדה התעופה", self.index)
+        self.assertIn("departureDate=f.schedule_departure_date||f.departure_date||f.date||f.start||f.schedule_arrival_date||f.arrival_date", self.index)
+
+    def test_extraction_keeps_stated_terminals(self):
+        source = (ROOT / "telegram-bot" / "server.py").read_text(encoding="utf-8")
+        self.assertIn('"departure_terminal":str(segment.get("departure_terminal") or "")', source)
+        self.assertIn('"departure_terminal":{"type":"string"}', source)
