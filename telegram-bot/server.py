@@ -1087,6 +1087,46 @@ def apply_review_decision(intake_id, decision, overrides=None):
     return record
 
 
+_EMAIL_ID_IN_DOCUMENT = re.compile(r"^email_([0-9]{20}-[0-9a-f]{12})_")
+
+
+def email_id_for_document(filename):
+    match = _EMAIL_ID_IN_DOCUMENT.match(str(filename or ""))
+    return match.group(1) if match else ""
+
+
+def sanitize_email_html(value):
+    """Display-only copy of an email: no scripts, handlers, forms or embedded frames."""
+    html = str(value or "")
+    html = re.sub(r"(?is)<(script|iframe|object|embed|form|meta|link|base)\b.*?(?:</\1\s*>|/?>)", "", html)
+    html = re.sub(r"(?is)<(script|iframe|object|embed|form)\b[^>]*>", "", html)
+    html = re.sub(r"(?i)\son[a-z]+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", html)
+    html = re.sub(r"(?i)(href|src)\s*=\s*([\"'])\s*(?:javascript|vbscript|data:text/html)[^\"']*\2", r'\1="#"', html)
+    return html
+
+
+def email_view_html(intake_id):
+    record = next((item for item in load_email_index() if str(item.get("id")) == str(intake_id)), None)
+    if not record:
+        return None
+    folder = email_record_folder(record)
+    head = ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+            '<base target="_blank"><style>body{margin:0;padding:12px;font:15px/1.45 -apple-system,system-ui,sans-serif;color:#111;background:#fff;word-break:break-word}'
+            'img{max-width:100%;height:auto}table{max-width:100%!important}pre{white-space:pre-wrap;font:inherit}</style></head><body>')
+    html_path = folder / "body.html"
+    try:
+        body_html = html_path.read_text(encoding="utf-8", errors="replace") if html_path.is_file() else ""
+    except OSError:
+        body_html = ""
+    if body_html.strip():
+        return head + sanitize_email_html(body_html) + "</body></html>"
+    text = email_body_text(record)
+    if not text.strip():
+        return None
+    import html as html_lib
+    return head + '<pre dir="auto">' + html_lib.escape(text) + "</pre></body></html>"
+
+
 def email_record_folder(record):
     return EMAIL_DIR / str(record.get("id"))
 
@@ -1161,7 +1201,8 @@ def html_to_text(value):
         parser.close()
     except (TypeError, ValueError):
         return ""
-    return re.sub(r"[ \t]+", " ", re.sub(r"\n{3,}", "\n\n", "".join(parser.parts))).strip()
+    lines = [re.sub(r"[ \t\u00a0]+", " ", line).strip() for line in "".join(parser.parts).splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
 def normalize_date_value(value):
@@ -2573,8 +2614,8 @@ def gemini_extract_attraction(path):
 def extract_hotel_name(text):
     patterns = [
         r"Adina Apartment Hotel[^\n]+",
-        r"Hotel\s+[A-Z][A-Za-zÀ-ÿ]+(?:[ ,&'-]+[A-Za-zÀ-ÿ]+){0,8}",
-        r"[A-Z][A-Za-zÀ-ÿ]+(?:[ ,&'-]+[A-Za-zÀ-ÿ]+){0,5}\s+(?:Hotel|Meliá|Melia)(?:[ ,&'-]+[A-Za-zÀ-ÿ]+){0,5}"
+        r"Hotel[ \t]+[A-Z][A-Za-zÀ-ÿ]+(?:[ ,&'-]+[A-Za-zÀ-ÿ]+){0,8}",
+        r"[A-Z][A-Za-zÀ-ÿ]+(?:[ ,&'-]+[A-Za-zÀ-ÿ]+){0,5}[ \t]+(?:Hotel|Meliá|Melia)(?:[ ,&'-]+[A-Za-zÀ-ÿ]+){0,5}"
     ]
     for pattern in patterns:
         match = re.search(pattern, text, re.I)
@@ -2970,7 +3011,9 @@ def ensure_hotel_events():
         normalized_title = " · ".join(countries)
         if normalized_title and trip.get("title") != normalized_title: trip["title"] = normalized_title; trips_changed = True
         hotel = trip.get("hotel") or ""
-        if not hotel and trip.get("document"):
+        other_bookings = any(trip.get(group) for group in ("flights", "rentals", "trains", "attractions", "restaurants"))
+        document_title = str((trip.get("document_titles") or {}).get(trip.get("document"), ""))
+        if not hotel and trip.get("document") and not other_bookings and not document_title.startswith(("כרטיס", "השכרת", "הזמנת מסעדה", "אטרקציה", "ביטוח")):
             candidates = list(UPLOADS.glob("*" + Path(trip["document"]).name)) + list(UPLOADS.glob("*" + Path(trip["document"]).stem + "*"))
             for candidate in candidates:
                 hotel = extract_hotel_name(extract_pdf_text(candidate))
@@ -3262,6 +3305,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"emails": emails}); return
         if path == "/api/intake/telegram":
             self._json(200, {"intake": load_telegram_intake()}); return
+        email_view = re.fullmatch(r"/api/emails/([0-9]{20}-[0-9a-f]{12})/view", path)
+        if email_view:
+            page = email_view_html(email_view.group(1))
+            if page is None:
+                self._json(404, {"error": "email_not_found"}); return
+            raw = page.encode("utf-8"); self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", "default-src 'none'; img-src https: data:; style-src 'unsafe-inline' https:; font-src https: data:; form-action 'none'")
+            self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         if path.startswith("/api/documents/"):
             requested = urllib.parse.unquote(path[len("/api/documents/"):])
             filename = safe_document_filename(requested)
